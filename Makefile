@@ -50,7 +50,7 @@ venv: ## Create the backend virtual environment (with pip bootstrap fallback)
 	$(VENV_PY) -m pip install --upgrade pip setuptools wheel
 
 init-backend: venv ## Install backend runtime + dev dependencies and Playwright
-	$(VENV_PIP) install -r $(BACKEND_DIR)/requirements-dev.txt
+	$(VENV_PIP) install -r $(BACKEND_DIR)/requirements.txt -r $(BACKEND_DIR)/requirements-dev.txt
 	$(VENV)/bin/playwright install chromium
 
 init-frontend: ## Install frontend dependencies
