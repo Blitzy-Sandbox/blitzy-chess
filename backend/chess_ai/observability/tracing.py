@@ -16,6 +16,7 @@ configures nothing at import time.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import logging
 import os
@@ -61,10 +62,13 @@ def setup_tracing(
 ) -> TracerProvider:
     """Configure the global tracer provider and return it.
 
-    Call once at startup. Calling again returns the existing provider without
-    adding another span processor. An OTLP exporter is attached only when an
-    endpoint is configured, either via ``otlp_endpoint`` or the
-    ``OTEL_EXPORTER_OTLP_ENDPOINT`` environment variable. With no endpoint and
+    Call once at startup. The provider is a process-lifetime singleton: calling
+    again (including after :func:`shutdown_tracing`) returns the
+    already-registered provider without adding another span processor or trying
+    to replace the global provider, which OpenTelemetry does not allow. An OTLP
+    exporter is attached only when an endpoint is configured, either via
+    ``otlp_endpoint`` or the ``OTEL_EXPORTER_OTLP_ENDPOINT`` environment
+    variable. With no endpoint and
     ``OTEL_CONSOLE_EXPORT=1``, a console exporter is attached for local
     inspection; otherwise the provider runs without an exporter. Exporter
     construction failures are logged and swallowed, so this function does not
@@ -84,6 +88,16 @@ def setup_tracing(
     if _configured and _provider is not None:
         return _provider
 
+    # OpenTelemetry registers the global tracer provider once per process and
+    # refuses to replace it afterward. If a concrete SDK provider is already
+    # registered (for example by an earlier setup in this process), adopt it so
+    # the returned provider stays identical to trace.get_tracer_provider().
+    existing = trace.get_tracer_provider()
+    if isinstance(existing, TracerProvider):
+        _provider = existing
+        _configured = True
+        return existing
+
     resolved_name = service_name or os.environ.get("OTEL_SERVICE_NAME") or DEFAULT_SERVICE_NAME
     resource = Resource.create({SERVICE_NAME: resolved_name})
     provider = TracerProvider(resource=resource)
@@ -97,6 +111,7 @@ def setup_tracing(
         provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
 
     trace.set_tracer_provider(provider)
+    atexit.register(_atexit_shutdown)
     _provider = provider
     _configured = True
     return provider
@@ -205,20 +220,31 @@ def span(name: str, **attributes: Any) -> Iterator[trace.Span]:
 # Shutdown
 # ---------------------------------------------------------------------------
 def shutdown_tracing() -> None:
-    """Flush and shut down the global tracer provider.
+    """Flush the global tracer provider's pending spans.
 
     Called from the application lifespan shutdown. Flushes the batch processor
-    and releases resources, then resets module state so a later
-    :func:`setup_tracing` can reinitialize. Safe to call when
+    so buffered spans are exported. It deliberately does NOT reset module state
+    or shut the provider down for good: OpenTelemetry's global tracer provider
+    is set once per process and cannot be replaced, so the provider is kept as
+    the process-lifetime singleton and a later :func:`setup_tracing` returns the
+    same provider. Final teardown runs once at interpreter exit via the
+    registered :func:`_atexit_shutdown`. Safe to call when
     :func:`setup_tracing` was never called.
     """
-    global _provider, _configured
-
     if _provider is not None:
         try:
-            _provider.shutdown()
+            _provider.force_flush()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Tracing shutdown failed: %s", exc)
+            logger.warning("Tracing flush failed: %s", exc)
 
-    _provider = None
-    _configured = False
+
+def _atexit_shutdown() -> None:
+    """Shut down the provider once at interpreter exit to release resources.
+
+    Registered by :func:`setup_tracing` for a provider this module created and
+    registered. Best-effort: any failure during interpreter shutdown is
+    suppressed.
+    """
+    if _provider is not None:
+        with contextlib.suppress(Exception):
+            _provider.shutdown()

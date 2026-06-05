@@ -33,6 +33,7 @@ dependency-free and instant to import from any layer.
 """
 
 import json
+import re
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 
@@ -60,11 +61,107 @@ class ErrorCode(StrEnum):
 # Exceptions
 # ---------------------------------------------------------------------------
 class ProtocolError(Exception):
-    """Raised when an inbound message cannot be parsed into a known type.
+    """Raised when a message violates the protocol contract.
 
-    The transport catches this and replies with an ``ErrorMessage`` carrying
+    Covers an inbound payload that cannot be parsed into a known type and any
+    message whose field types or value domains fall outside the contract. The
+    transport catches this and replies with an ``ErrorMessage`` carrying
     ``ErrorCode.INVALID_MESSAGE``.
     """
+
+
+# ---------------------------------------------------------------------------
+# Field validation helpers
+# ---------------------------------------------------------------------------
+# Squares are lowercase algebraic strings "a1".."h8"; promotion is a lowercase
+# piece letter or None. Validation runs in each message's __post_init__ so both
+# inbound parsing and outbound construction reject malformed data with a
+# ProtocolError instead of building objects that carry bad values downstream.
+_SQUARE_RE = re.compile(r"^[a-h][1-8]$")
+_PROMOTION_PIECES = frozenset({"q", "r", "b", "n"})
+
+
+def _invalid(field_name: str, expected: str, value: object) -> ProtocolError:
+    """Return a ``ProtocolError`` describing a field that failed validation."""
+    return ProtocolError(
+        f"invalid {field_name}: expected {expected}, got {type(value).__name__} {value!r}"
+    )
+
+
+def _check_str(value: object, field_name: str) -> None:
+    """Require a ``str``."""
+    if not isinstance(value, str):
+        raise _invalid(field_name, "a string", value)
+
+
+def _check_nonempty_str(value: object, field_name: str) -> None:
+    """Require a non-empty ``str`` (accepts ``str``-subclass enum members)."""
+    if not isinstance(value, str) or not value:
+        raise _invalid(field_name, "a non-empty string", value)
+
+
+def _check_optional_str(value: object, field_name: str) -> None:
+    """Require ``None`` or a ``str``."""
+    if value is not None and not isinstance(value, str):
+        raise _invalid(field_name, "a string or null", value)
+
+
+def _check_optional_nonempty_str(value: object, field_name: str) -> None:
+    """Require ``None`` or a non-empty ``str``."""
+    if value is not None and (not isinstance(value, str) or not value):
+        raise _invalid(field_name, "a non-empty string or null", value)
+
+
+def _check_square(value: object, field_name: str) -> None:
+    """Require a lowercase algebraic square such as ``"e2"``."""
+    if not isinstance(value, str) or not _SQUARE_RE.match(value):
+        raise _invalid(field_name, "an algebraic square 'a1'..'h8'", value)
+
+
+def _check_promotion(value: object, field_name: str) -> None:
+    """Require ``None`` or one of the promotion piece letters ``q r b n``."""
+    if value is not None and value not in _PROMOTION_PIECES:
+        raise _invalid(field_name, "one of 'q','r','b','n', or null", value)
+
+
+def _check_bool(value: object, field_name: str) -> None:
+    """Require a ``bool`` (and not an ``int`` masquerading as one)."""
+    if not isinstance(value, bool):
+        raise _invalid(field_name, "a boolean", value)
+
+
+def _check_int(value: object, field_name: str) -> None:
+    """Require an ``int`` (``bool`` is rejected even though it subclasses int)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _invalid(field_name, "an integer", value)
+
+
+def _check_optional_int(value: object, field_name: str) -> None:
+    """Require ``None`` or an ``int`` (``bool`` rejected)."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise _invalid(field_name, "an integer or null", value)
+
+
+def _check_optional_number(value: object, field_name: str) -> None:
+    """Require ``None`` or a real number (``int``/``float``, ``bool`` rejected)."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int | float)):
+        raise _invalid(field_name, "a number or null", value)
+
+
+def _check_str_list(value: object, field_name: str) -> None:
+    """Require a ``list`` whose items are all ``str``."""
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise _invalid(field_name, "a list of strings", value)
+
+
+def _check_optional_str_dict(value: object, field_name: str) -> None:
+    """Require ``None`` or a ``dict`` with string keys and string values."""
+    if value is None:
+        return
+    if not isinstance(value, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+    ):
+        raise _invalid(field_name, "an object of string keys and values, or null", value)
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +190,7 @@ class _Message:
 class CreateRoomMessage(_Message):
     """Request to create a new multiplayer room. No payload fields."""
 
-    type: str = field(default="create_room")
+    type: str = field(default="create_room", init=False)
 
 
 @dataclass
@@ -101,7 +198,10 @@ class JoinRoomMessage(_Message):
     """Request to join an existing room by its 6-character code."""
 
     code: str
-    type: str = field(default="join_room")
+    type: str = field(default="join_room", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.code, "code")
 
 
 @dataclass
@@ -117,7 +217,13 @@ class MoveMessage(_Message):
     to_square: str
     promotion: str | None = None
     san: str | None = None
-    type: str = field(default="move")
+    type: str = field(default="move", init=False)
+
+    def __post_init__(self) -> None:
+        _check_square(self.from_square, "from_square")
+        _check_square(self.to_square, "to_square")
+        _check_promotion(self.promotion, "promotion")
+        _check_optional_str(self.san, "san")
 
 
 @dataclass
@@ -130,7 +236,11 @@ class ReconnectMessage(_Message):
 
     code: str
     player_token: str
-    type: str = field(default="reconnect")
+    type: str = field(default="reconnect", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.code, "code")
+        _check_nonempty_str(self.player_token, "player_token")
 
 
 @dataclass
@@ -142,7 +252,10 @@ class ResignMessage(_Message):
     """
 
     player_token: str | None = None
-    type: str = field(default="resign")
+    type: str = field(default="resign", init=False)
+
+    def __post_init__(self) -> None:
+        _check_optional_nonempty_str(self.player_token, "player_token")
 
 
 # ===========================================================================
@@ -159,7 +272,12 @@ class RoomCreatedMessage(_Message):
     code: str
     color: str
     player_token: str
-    type: str = field(default="room_created")
+    type: str = field(default="room_created", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.code, "code")
+        _check_nonempty_str(self.color, "color")
+        _check_nonempty_str(self.player_token, "player_token")
 
 
 @dataclass
@@ -173,7 +291,12 @@ class RoomJoinedMessage(_Message):
     code: str
     color: str
     player_token: str
-    type: str = field(default="room_joined")
+    type: str = field(default="room_joined", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.code, "code")
+        _check_nonempty_str(self.color, "color")
+        _check_nonempty_str(self.player_token, "player_token")
 
 
 @dataclass
@@ -203,7 +326,17 @@ class StateMessage(_Message):
     last_move: dict[str, str] | None = None
     winner: str | None = None
     result: str | None = None
-    type: str = field(default="state")
+    type: str = field(default="state", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.fen, "fen")
+        _check_str_list(self.move_history, "move_history")
+        _check_nonempty_str(self.turn, "turn")
+        _check_nonempty_str(self.status, "status")
+        _check_bool(self.in_check, "in_check")
+        _check_optional_str_dict(self.last_move, "last_move")
+        _check_optional_nonempty_str(self.winner, "winner")
+        _check_optional_str(self.result, "result")
 
 
 @dataclass
@@ -233,7 +366,17 @@ class AiThinkingMessage(_Message):
     nps: int | None = None
     mate_in: int | None = None
     seldepth: int | None = None
-    type: str = field(default="ai_thinking")
+    type: str = field(default="ai_thinking", init=False)
+
+    def __post_init__(self) -> None:
+        _check_int(self.depth, "depth")
+        _check_int(self.evaluation, "evaluation")
+        _check_str_list(self.pv, "pv")
+        _check_int(self.nodes, "nodes")
+        _check_optional_number(self.time_s, "time_s")
+        _check_optional_int(self.nps, "nps")
+        _check_optional_int(self.mate_in, "mate_in")
+        _check_optional_int(self.seldepth, "seldepth")
 
 
 @dataclass
@@ -251,7 +394,12 @@ class GameOverMessage(_Message):
     result: str
     winner: str | None
     reason: str
-    type: str = field(default="game_over")
+    type: str = field(default="game_over", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.result, "result")
+        _check_optional_nonempty_str(self.winner, "winner")
+        _check_str(self.reason, "reason")
 
 
 @dataclass
@@ -264,7 +412,11 @@ class ErrorMessage(_Message):
 
     code: str
     message: str
-    type: str = field(default="error")
+    type: str = field(default="error", init=False)
+
+    def __post_init__(self) -> None:
+        _check_nonempty_str(self.code, "code")
+        _check_str(self.message, "message")
 
 
 # ===========================================================================

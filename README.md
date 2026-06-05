@@ -30,7 +30,7 @@ Each tier caps the AI by how deep it searches and how long it may think.
 
 You need these on a clean machine:
 
-- **Python 3** (3.11 or newer recommended)
+- **Python 3.11 or newer** (required; the backend uses 3.11+ features such as `enum.StrEnum`)
 - **Node.js** (18 or newer)
 - **make**
 - **git**
