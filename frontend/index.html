@@ -3,10 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Empty inline icon: avoids the default /favicon.ico request; no file referenced. -->
+    <link rel="icon" href="data:," />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#1e1e1e" />
+    <meta name="description" content="Play chess against a hand-built AI or a friend online." />
     <title>Blitzy Chess</title>
+
+    <!-- Pre-paint dark theming; full styling lives in src/styles/index.css. -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background-color: #1e1e1e;
+        color: #e5e5e5;
+      }
+
+      .no-js-message {
+        box-sizing: border-box;
+        max-width: 40rem;
+        margin: 4rem auto;
+        padding: 1.5rem;
+        font-family: system-ui, sans-serif;
+        line-height: 1.5;
+        text-align: center;
+      }
+    </style>
   </head>
   <body>
+    <!-- React mounts the single-page application here (see src/main.tsx). -->
     <div id="root"></div>
+
+    <!-- Shown only when JavaScript is unavailable; this app is client-rendered. -->
+    <noscript>
+      <div class="no-js-message">
+        Blitzy Chess requires JavaScript. Please enable it in your browser to play.
+      </div>
+    </noscript>
+
+    <!-- ES module entry point (transformed by Vite on build). -->
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
