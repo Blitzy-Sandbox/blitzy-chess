@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * Design tokens — the prompt's own values ARE the design system.
+ * Mirrored as Tailwind utilities in tailwind.config.js
+ * (board-light / board-dark / panel / max-w-board).
+ * ------------------------------------------------------------------ */
+/* prettier-ignore */
+:root {
+  --board-light: #EED8B5;
+  --board-dark: #AB7A53;
+  --panel: #1e1e1e;
+  --board-max: 640px;
+  --text-primary: #e8e8e8;
+}
+
+/* ------------------------------------------------------------------ *
+ * Global / base theme — dark, full-height SPA shell.
+ * Lives in @layer base so Tailwind utilities can override it.
+ * ------------------------------------------------------------------ */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--panel);
+    color: var(--text-primary);
+    font-family:
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      Roboto,
+      Helvetica,
+      Arial,
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Small custom component layer — only helpers Tailwind utilities and
+ * react-chessboard customSquareStyles do not cover cleanly.
+ * ------------------------------------------------------------------ */
+@layer components {
+  /* Centered board width cap (mirror of Tailwind `max-w-board`). */
+  .board-cap {
+    width: 100%;
+    max-width: var(--board-max);
+  }
+
+  /* Auto-scrolling move-history region with a slim dark scrollbar. */
+  .move-history-scroll {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #4a4a4a transparent;
+  }
+
+  .move-history-scroll::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .move-history-scroll::-webkit-scrollbar-thumb {
+    background-color: #4a4a4a;
+    border-radius: 4px;
+  }
+
+  /* Optional square-highlight helpers (components may instead pass
+     react-chessboard customSquareStyles inline). */
+  .square-last-move {
+    background-color: rgba(155, 199, 0, 0.41);
+  }
+
+  .square-legal-target {
+    background-image: radial-gradient(circle, rgba(0, 0, 0, 0.24) 22%, transparent 24%);
+  }
+
+  .square-check {
+    background-color: rgba(255, 0, 0, 0.45);
+  }
+}
