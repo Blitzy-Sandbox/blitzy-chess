@@ -1,0 +1,39 @@
+# Backend tool configuration: ruff (lint + format), pytest, and coverage.
+# This file centralizes tool settings only; runtime/dev dependencies live in
+# requirements.txt / requirements-dev.txt.
+
+[project]
+name = "chess-ai-backend"
+version = "0.1.0"
+description = "Chess AI backend: FastAPI + WebSocket server and a hand-built chess engine."
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "books", "tables", "games"]
+
+[tool.ruff.lint]
+# A pragmatic default rule set: pyflakes (F), pycodestyle (E, W), isort (I),
+# pyupgrade (UP), flake8-bugbear (B), and comprehensions (C4).
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+ignore = ["E501"]  # line length handled by the formatter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra -q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+source = ["chess_ai"]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

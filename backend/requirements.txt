@@ -1,0 +1,17 @@
+# Runtime dependencies for the chess_ai backend.
+# Version policy: floors (>=) come from the project prompt and are treated as
+# canonical minimums; packages the spec pins to an exact release use ==.
+# NOTE: python-chess installs under the distribution name "chess" (import chess).
+
+fastapi>=0.111
+uvicorn[standard]>=0.30
+chess>=1.10
+
+# Observability (project-rule mandate): structured logging, tracing, metrics.
+prometheus-client==0.25.0
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-instrumentation-fastapi==0.63b1
+opentelemetry-exporter-otlp==1.42.1
+structlog==25.5.0
+asgi-correlation-id==5.0.0

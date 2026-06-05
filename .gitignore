@@ -1,0 +1,37 @@
+# ---- Python / backend ----
+backend/.venv/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+
+# ---- Node / frontend ----
+node_modules/
+frontend/dist/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- Downloaded data assets (fetched via make targets, not committed) ----
+backend/books/
+backend/tables/
+
+# ---- Self-play recordings & transcripts (runtime output) ----
+backend/games/
+
+# ---- Misc / OS ----
+.DS_Store
+*.log
+.env
+.env.*
+.idea/
+.vscode/
