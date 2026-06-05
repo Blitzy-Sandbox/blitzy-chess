@@ -4,55 +4,52 @@
  * Entry point for `make lint` (npm run lint -> `eslint .`). It lints the
  * TypeScript / React single-page application source under `src/`.
  *
- * Module system: package.json declares `"type": "module"`, so this file is an
- * ES module. It uses `import` / `export default` and never `require` /
- * `module.exports`.
+ * Composition (order is significant):
+ *   1. Global ignore patterns.
+ *   2. typescript-eslint recommended (non type-checked) — the TypeScript parser
+ *      plus a pragmatic set of syntactic rules.
+ *   3. eslint-plugin-react-hooks (recommended) — enforces the Rules of Hooks and
+ *      flags missing effect dependencies.
+ *   4. eslint-plugin-react-refresh (Vite preset) — keeps modules fast-refresh
+ *      friendly for the Vite dev server.
+ *   5. Project block — browser/DOM globals and two TypeScript rules relaxed to
+ *      warnings.
  *
- * Dependency discipline: the only package imported here is `typescript-eslint`.
- * That single package bundles the TypeScript parser, the `@typescript-eslint`
- * plugin, the typed `config()` flat-config helper, and the `configs.recommended`
- * preset. No other lint packages (`@eslint/js`, `globals`,
- * `eslint-plugin-react-hooks`, `eslint-plugin-react-refresh`) are imported,
- * because they are not declared dependencies in package.json and importing them
- * would break `eslint .` with a module-not-found error.
- *
- * Preset choice: `configs.recommended` is the NON type-checked preset, so it
- * does not require `parserOptions.project`. This keeps the lint step fast and
- * robust regardless of tsconfig path nuances.
- *
- * @see https://typescript-eslint.io/packages/typescript-eslint
+ * The rationale for selecting this toolchain (and for declaring globals inline
+ * rather than depending on the `globals` package) is recorded in
+ * docs/decision-log.md, not in these comments, per the Explainability rule.
  */
 import tseslint from 'typescript-eslint';
+import reactHooks from 'eslint-plugin-react-hooks';
+import reactRefresh from 'eslint-plugin-react-refresh';
 
-/**
- * The composed flat-config array, built with the typed `tseslint.config()`
- * helper. Order is significant: global ignores first, then the recommended
- * preset, then the project-specific block that targets the TS/TSX source.
- */
 export default tseslint.config(
-  // 1) Global ignore patterns. Build output, coverage reports, and installed
-  //    dependencies are never linted.
+  // 1) Build output, coverage reports, and installed dependencies are never linted.
   {
     ignores: ['dist/**', 'coverage/**', 'node_modules/**'],
   },
 
   // 2) typescript-eslint's recommended (non type-checked) preset. Supplies the
-  //    TypeScript parser plus a pragmatic set of syntactic rules for the TS/TSX
-  //    sources without requiring type information.
+  //    TypeScript parser plus syntactic rules without requiring
+  //    parserOptions.project, which keeps the lint step fast.
   ...tseslint.configs.recommended,
 
-  // 3) Project-specific block for the application source. Declares the
-  //    browser/DOM runtime environment (the SPA runs in the browser and talks
-  //    to the backend over WebSocket) and relaxes two rules to warnings so the
-  //    lint step stays usable during active development.
+  // 3) React Hooks rules: `react-hooks/rules-of-hooks` (error) and
+  //    `react-hooks/exhaustive-deps` (warn). Appropriate for the React 18 SPA.
+  reactHooks.configs['recommended-latest'],
+
+  // 4) React Refresh rule (`react-refresh/only-export-components`) for the Vite
+  //    dev server's fast-refresh boundary; a no-op on non-component modules.
+  reactRefresh.configs.vite,
+
+  // 5) Application source. Declares the browser/DOM runtime globals the SPA uses
+  //    (the `globals` npm package is not a dependency; see the decision log) and
+  //    relaxes two rules to warnings so they do not block the lint step.
   {
     files: ['**/*.{ts,tsx}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
-      // Browser/DOM globals used across the SPA. Declared inline because the
-      // `globals` npm package is intentionally not a dependency. Every entry is
-      // read-only: application code references but never reassigns these.
       globals: {
         window: 'readonly',
         document: 'readonly',
@@ -79,15 +76,12 @@ export default tseslint.config(
       },
     },
     rules: {
-      // Unused identifiers are warnings rather than errors. An underscore prefix
-      // opts a binding out entirely, the common convention for intentionally
-      // unused parameters and destructured values.
+      // Unused identifiers are warnings; an underscore prefix opts a binding out.
       '@typescript-eslint/no-unused-vars': [
         'warn',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
-      // `any` is discouraged but allowed as a warning so it does not block the
-      // lint step while the application is under active development.
+      // `any` is discouraged but allowed as a warning during active development.
       '@typescript-eslint/no-explicit-any': 'warn',
     },
   },
