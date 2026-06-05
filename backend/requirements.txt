@@ -1,13 +1,39 @@
-# Runtime dependencies for the chess_ai backend.
-# Version policy: floors (>=) come from the project prompt and are treated as
-# canonical minimums; packages the spec pins to an exact release use ==.
-# NOTE: python-chess installs under the distribution name "chess" (import chess).
+# Runtime dependencies for the chess_ai backend (FastAPI + python-chess AI engine).
+#
+# Installed by `make init` (the init-backend target), together with the dev
+# manifest, both passed explicitly to a single resolver run:
+#     pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+#
+# Version policy (AAP 0.3.3): floors (>=) come from the project prompt and are
+# treated as canonical minimums; packages the spec pins to an exact release use
+# `==`. This manifest is RUNTIME-ONLY -- test, lint and browser-automation
+# tooling lives exclusively in requirements-dev.txt.
 
+# --- Web framework & ASGI server --------------------------------------------
+# fastapi           : ASGI app hosting the /ws/game and /ws/multiplayer WebSocket
+#                     endpoints plus the /health, readiness and /metrics REST routes.
+# uvicorn[standard] : ASGI server. The [standard] extra is load-bearing -- it pulls
+#                     in the websockets / httptools / uvloop stack the WebSocket
+#                     endpoints require. Keep the extra exactly as written.
 fastapi>=0.111
 uvicorn[standard]>=0.30
-chess>=1.10
 
-# Observability (project-rule mandate): structured logging, tracing, metrics.
+# --- Chess rules engine (authoritative -- Constraint 1) ---------------------
+# python-chess is the single source of truth for legality, SAN, FEN, draw
+# detection, Zobrist hashing, Polyglot opening books and Syzygy tablebases; the
+# server is authoritative and validates every move with board.is_legal().
+# NOTE: the library installs under the distribution name `chess` (backend code
+# does `import chess`). Never list it as `python-chess` -- that PyPI name is a
+# misleading stub that merely depends on `chess`.
+chess>=1.10   # python-chess; distribution name is "chess" (import chess)
+
+# --- Observability (project rule -- logging, tracing, metrics, correlation IDs)
+# prometheus-client                      : Prometheus metrics exposition at /metrics.
+# opentelemetry-api / -sdk               : distributed tracing API and SDK/span processing.
+# opentelemetry-instrumentation-fastapi  : automatic request/route span instrumentation.
+# opentelemetry-exporter-otlp            : trace export over OTLP.
+# structlog                              : structured, JSON-friendly logging.
+# asgi-correlation-id                    : per-connection / per-request correlation IDs.
 prometheus-client==0.25.0
 opentelemetry-api==1.42.1
 opentelemetry-sdk==1.42.1
