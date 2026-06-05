@@ -1,37 +1,118 @@
-# ---- Python / backend ----
-backend/.venv/
-.venv/
-venv/
+# =============================================================================
+# .gitignore - blitzy-chess monorepo
+# -----------------------------------------------------------------------------
+# Root-level ignore rules covering BOTH subprojects:
+#   - backend/   FastAPI app, hand-built chess engine, Python venv, tests
+#   - frontend/  Vite + React + TypeScript single-page application
+#
+# Generated, installed, and downloaded artifacts are never committed:
+# virtual environments, node_modules, build output, tool caches, the
+# downloaded opening book / Syzygy tablebases, and self-play recordings.
+#
+# Intentionally TRACKED (do NOT ignore):
+#   - frontend/package-lock.json  (lockfile for reproducible installs)
+#   - **/.gitkeep                 (placeholders that keep runtime dirs present)
+# Patterns are grouped under comment headers, one pattern per line.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python / backend
+# -----------------------------------------------------------------------------
+# Byte-compiled, optimized, and cached Python files
 __pycache__/
 *.py[cod]
+*$py.class
+
+# Packaging and build artifacts
+*.egg
 *.egg-info/
+build/
+dist/
+
+# Virtual environments (root-level and backend-local copies)
+.venv/
+venv/
+env/
+backend/.venv/
+backend/venv/
+
+# Test and lint tool caches
 .pytest_cache/
 .ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
 .mypy_cache/
 
-# ---- Node / frontend ----
+# Coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# -----------------------------------------------------------------------------
+# Node / frontend
+# -----------------------------------------------------------------------------
+# Installed dependencies
 node_modules/
+frontend/node_modules/
+
+# Frontend build output (generic dist/ lives in the Python section above)
 frontend/dist/
-dist/
 *.tsbuildinfo
+
+# Vite caches and local environment overrides
+.vite/
+*.local
+frontend/.env.local
+
+# Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-
-# ---- Downloaded data assets (fetched via make targets, not committed) ----
-backend/books/
-backend/tables/
-
-# ---- Self-play recordings & transcripts (runtime output) ----
-backend/games/
-
-# ---- Misc / OS ----
-.DS_Store
 *.log
-.env
-.env.*
+
+# NOTE: frontend/package-lock.json is intentionally NOT ignored - the lockfile
+# is committed so dependency installs are reproducible (AAP section 0.3.3).
+
+# -----------------------------------------------------------------------------
+# Chess data and generated artifacts (downloaded / runtime - never committed)
+# -----------------------------------------------------------------------------
+# Polyglot opening book (fetched by `make download-book` / `make init`)
+backend/books/*.bin
+
+# Syzygy endgame tablebases (fetched by `make download-syzygy`)
+backend/tables/*
+*.rtbw
+*.rtbz
+
+# Self-play screen recordings and annotated transcripts (runtime output)
+backend/games/*.mp4
+backend/games/*.md
+
+# Playwright automation artifacts
+backend/playwright-report/
+backend/test-results/
+
+# -----------------------------------------------------------------------------
+# Editor / OS noise
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+
+# -----------------------------------------------------------------------------
+# Environment variable files (may contain secrets - never committed)
+# -----------------------------------------------------------------------------
+.env
+.env.*
+
+# -----------------------------------------------------------------------------
+# Keep runtime-populated directories trackable via placeholder files.
+# Placed LAST so these re-inclusions are never overridden by a later pattern.
+# Works because the runtime dirs above ignore their CONTENTS (e.g.
+# `backend/tables/*`) rather than the directory itself, so .gitkeep can be
+# re-included.
+# -----------------------------------------------------------------------------
+!.gitkeep
+!**/.gitkeep
