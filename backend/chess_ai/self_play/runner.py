@@ -234,15 +234,141 @@ class ServerProcess:
 
 
 # ---------------------------------------------------------------------------
+# Recording finalization (WebM -> MP4 via a capable ffmpeg)
+# ---------------------------------------------------------------------------
+class RecordingFinalizationError(RuntimeError):
+    """Raised when the recorded WebM cannot be finalized into a real MP4.
+
+    The pipeline raises this rather than emitting a file with a ``.mp4`` name
+    that is not an MP4 container, so a failure is loud instead of producing a
+    mislabeled artifact (Constraint 14 requires a genuine MP4 recording).
+    """
+
+
+# ffmpeg invocations are bounded so a hung binary never stalls the pipeline.
+_FFMPEG_PROBE_TIMEOUT_S: float = 15.0
+_FFMPEG_TRANSCODE_TIMEOUT_S: float = 300.0
+
+
+def _playwright_cache_dir() -> Path | None:
+    """Return the Playwright browser cache directory for this platform.
+
+    Honors Playwright's own ``PLAYWRIGHT_BROWSERS_PATH`` override and otherwise
+    falls back to the per-OS default. Returns ``None`` when no such directory
+    exists.
+    """
+    override = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if override and override != "0":
+        candidate = Path(override)
+        return candidate if candidate.is_dir() else None
+
+    home = Path.home()
+    if sys.platform == "darwin":
+        cache = home / "Library" / "Caches" / "ms-playwright"
+    elif sys.platform.startswith("win"):
+        local = os.environ.get("LOCALAPPDATA")
+        base = Path(local) if local else home / "AppData" / "Local"
+        cache = base / "ms-playwright"
+    else:
+        cache = home / ".cache" / "ms-playwright"
+    return cache if cache.is_dir() else None
+
+
+def _bundled_ffmpeg_candidates() -> list[Path]:
+    """List the ffmpeg executables Playwright bundles in its browser cache.
+
+    Playwright ships ffmpeg under ``ffmpeg-<build>/ffmpeg-<platform>``; this
+    globs every matching executable so discovery can probe each one.
+    """
+    cache = _playwright_cache_dir()
+    if cache is None:
+        return []
+    return [
+        path
+        for path in sorted(cache.glob("ffmpeg-*/ffmpeg-*"))
+        if path.is_file() and os.access(path, os.X_OK)
+    ]
+
+
+def _run_ffmpeg(
+    args: list[str], *, timeout_s: float = _FFMPEG_TRANSCODE_TIMEOUT_S
+) -> subprocess.CompletedProcess:
+    """Run an ffmpeg command and capture its output.
+
+    The single seam through which both the muxer probe and the transcode call
+    ffmpeg, so tests can substitute the whole subprocess interaction.
+    """
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout_s)
+
+
+def _ffmpeg_supports_mp4(ffmpeg: str) -> bool:
+    """Report whether ``ffmpeg`` advertises an MP4 muxer.
+
+    Playwright's bundled ffmpeg is built with only the WebM and image muxers, so
+    its mere presence is not enough; this probes ``-muxers`` for an MP4 muxing
+    entry. Any probe error is treated as "not capable".
+    """
+    try:
+        completed = _run_ffmpeg(
+            [ffmpeg, "-hide_banner", "-muxers"], timeout_s=_FFMPEG_PROBE_TIMEOUT_S
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if completed.returncode != 0:
+        return False
+    for line in (completed.stdout or "").splitlines():
+        parts = line.split()
+        # A muxing-capable row looks like ``  E  mp4  MP4 (MPEG-4 Part 14)``:
+        # the flag field carries ``E`` and the format field names ``mp4``.
+        if len(parts) >= 2 and "E" in parts[0] and "mp4" in parts[1].split(","):
+            return True
+    return False
+
+
+def _discover_mp4_capable_ffmpeg() -> str | None:
+    """Find an ffmpeg that can actually mux MP4, or ``None`` when none exists.
+
+    Prefers a system ffmpeg on ``PATH`` (typically a full build with libx264),
+    then falls back to Playwright's bundled binaries. Each candidate is verified
+    with :func:`_ffmpeg_supports_mp4`, so a WebM-only build is rejected rather
+    than silently accepted.
+    """
+    system = shutil.which("ffmpeg")
+    if system and _ffmpeg_supports_mp4(system):
+        return system
+    for candidate in _bundled_ffmpeg_candidates():
+        if _ffmpeg_supports_mp4(str(candidate)):
+            return str(candidate)
+    return None
+
+
+def _is_valid_mp4(path: Path) -> bool:
+    """Report whether ``path`` begins with an ISO base-media (MP4) ``ftyp`` box.
+
+    A genuine MP4 carries an ``ftyp`` box at the start, with the box type in
+    bytes 4-8. WebM begins with the EBML signature instead, so this check
+    distinguishes a real transcode from mislabeled WebM bytes.
+    """
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(12)
+    except OSError:
+        return False
+    return len(header) >= 8 and header[4:8] == b"ftyp"
+
+
+# ---------------------------------------------------------------------------
 # Browser automation and screen recording (Playwright, lazy import)
 # ---------------------------------------------------------------------------
 class BrowserRecorder:
     """Drive a Playwright Chromium browser and record the ``/self-play`` screen.
 
     Playwright records WebM into a temporary directory; :meth:`stop_and_save`
-    finalizes that recording into the exact ``.mp4`` target, transcoding with
-    ffmpeg when available and copying the bytes otherwise. The Playwright
-    entrypoint is injectable so tests can run without a real browser.
+    finalizes that recording into the exact ``.mp4`` target by transcoding with
+    an MP4-capable ffmpeg, and raises :class:`RecordingFinalizationError` when no
+    such ffmpeg is available rather than emitting a mislabeled file. The
+    Playwright entrypoint and the ffmpeg resolver are injectable so tests can run
+    without a real browser or ffmpeg.
     """
 
     def __init__(
@@ -254,6 +380,7 @@ class BrowserRecorder:
         height: int = 720,
         playwright_factory: Callable[[], object] | None = None,
         ready_timeout_ms: int = 5000,
+        ffmpeg_resolver: Callable[[], str | None] | None = None,
     ) -> None:
         """Store recorder configuration; no browser is launched until :meth:`start`.
 
@@ -266,6 +393,9 @@ class BrowserRecorder:
                 context manager; resolved lazily to ``async_playwright`` when
                 ``None``.
             ready_timeout_ms: Milliseconds to wait for the readiness hook.
+            ffmpeg_resolver: Optional zero-arg callable returning the path to an
+                MP4-capable ffmpeg, or ``None`` when none is available; defaults
+                to :func:`_discover_mp4_capable_ffmpeg`.
         """
         self.url = url
         self.headless = headless
@@ -273,6 +403,7 @@ class BrowserRecorder:
         self.height = height
         self._playwright_factory = playwright_factory
         self.ready_timeout_ms = ready_timeout_ms
+        self._ffmpeg_resolver = ffmpeg_resolver or _discover_mp4_capable_ffmpeg
 
         self._pw_context: object | None = None
         self._pw: object | None = None
@@ -334,18 +465,24 @@ class BrowserRecorder:
         except Exception as exc:
             logger.debug("render hook failed: %s", exc)
 
-    async def stop_and_save(self, target_mp4: Path) -> Path | None:
+    async def stop_and_save(self, target_mp4: Path) -> Path:
         """Close the browser, finalize the recording, and return the saved path.
 
         The video path is captured before closing the context (Playwright writes
-        the file only on ``context.close()``). Every teardown step is guarded so
-        a recording problem cannot block server shutdown.
+        the file only on ``context.close()``). Every browser-teardown step is
+        guarded so a recording problem cannot block server shutdown; the final
+        MP4 conversion is not guarded here, so a finalization failure surfaces to
+        the caller instead of leaving a mislabeled artifact.
 
         Args:
             target_mp4: The exact ``.mp4`` path the recording is saved to.
 
         Returns:
-            The produced ``.mp4`` path, or ``None`` when no recording was made.
+            The produced ``.mp4`` path.
+
+        Raises:
+            RecordingFinalizationError: If no WebM was recorded or no MP4-capable
+                ffmpeg could produce a valid MP4 at ``target_mp4``.
         """
         webm_path_str: str | None = None
         if self._page is not None:
@@ -366,39 +503,84 @@ class BrowserRecorder:
 
         return self._finalize_recording(webm_path_str, Path(target_mp4))
 
-    def _finalize_recording(self, webm_path: str | None, target_mp4: Path) -> Path | None:
-        """Produce the exact ``.mp4`` artifact from the recorded WebM.
+    def _finalize_recording(self, webm_path: str | None, target_mp4: Path) -> Path:
+        """Transcode the recorded WebM into the exact ``.mp4`` artifact.
 
-        Transcodes with ffmpeg when it is on the PATH; otherwise copies the WebM
-        bytes into the ``.mp4`` target. Returns ``None`` on any failure or when
-        no WebM exists.
+        Resolves an MP4-capable ffmpeg, transcodes the WebM to H.264/MP4, and
+        verifies the output is a real MP4 before returning it. A partial or
+        invalid output is removed. The WebM bytes are never copied under the
+        ``.mp4`` name.
+
+        Args:
+            webm_path: Path to the WebM Playwright recorded, or ``None``.
+            target_mp4: The exact ``.mp4`` path to produce.
+
+        Returns:
+            The produced, validated ``.mp4`` path.
+
+        Raises:
+            RecordingFinalizationError: If there is no WebM source, no MP4-capable
+                ffmpeg, the transcode fails, or the output is not a valid MP4.
         """
+        target_mp4 = Path(target_mp4)
+        target_mp4.parent.mkdir(parents=True, exist_ok=True)
+
+        if not webm_path or not Path(webm_path).exists():
+            raise RecordingFinalizationError(
+                "no WebM recording was produced by the browser; cannot create the "
+                f"required MP4 artifact at {target_mp4}"
+            )
+
+        ffmpeg = self._ffmpeg_resolver()
+        if not ffmpeg:
+            raise RecordingFinalizationError(
+                "no MP4-capable ffmpeg was found (a system ffmpeg with an MP4 muxer "
+                "is required; Playwright's bundled ffmpeg only muxes WebM). Install "
+                "ffmpeg and ensure it is on PATH, then re-run `make self-play`. The "
+                f"WebM recording was left at {webm_path}"
+            )
+
         try:
-            target_mp4 = Path(target_mp4)
-            target_mp4.parent.mkdir(parents=True, exist_ok=True)
+            completed = _run_ffmpeg(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(webm_path),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    "-an",
+                    str(target_mp4),
+                ]
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self._remove_partial(target_mp4)
+            raise RecordingFinalizationError(
+                f"ffmpeg invocation failed while transcoding to {target_mp4}: {exc}"
+            ) from exc
 
-            if not webm_path or not Path(webm_path).exists():
-                logger.warning("no recording produced (WebM source missing)")
-                return None
+        if completed.returncode != 0:
+            self._remove_partial(target_mp4)
+            raise RecordingFinalizationError(
+                f"ffmpeg transcode to MP4 failed (exit code {completed.returncode}): "
+                f"{(completed.stderr or '').strip()[-500:]}"
+            )
 
-            ffmpeg = shutil.which("ffmpeg")
-            if ffmpeg:
-                completed = subprocess.run(
-                    [ffmpeg, "-y", "-i", str(webm_path), str(target_mp4)],
-                    capture_output=True,
-                )
-                if completed.returncode == 0 and target_mp4.exists():
-                    return target_mp4
-                logger.warning(
-                    "ffmpeg transcode failed (code %s); copying WebM bytes instead",
-                    completed.returncode,
-                )
+        if not target_mp4.exists() or not _is_valid_mp4(target_mp4):
+            self._remove_partial(target_mp4)
+            raise RecordingFinalizationError(f"ffmpeg did not produce a valid MP4 at {target_mp4}")
 
-            shutil.copyfile(webm_path, target_mp4)
-            return target_mp4
-        except Exception:
-            logger.exception("failed to finalize the recording")
-            return None
+        return target_mp4
+
+    @staticmethod
+    def _remove_partial(path: Path) -> None:
+        """Delete a partial or invalid output file, ignoring missing-file errors."""
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
     async def cleanup(self) -> None:
         """Close any open handles and remove the temporary recording directory.
@@ -685,6 +867,7 @@ async def run_self_play(
     annotations: list[MoveAnnotation] = []
     result_str = "*"
     result_reason = "game incomplete"
+    finalize_error: Exception | None = None
 
     try:
         await server.start()
@@ -699,9 +882,15 @@ async def run_self_play(
             game_start=game_start,
         )
     finally:
-        with contextlib.suppress(Exception):
+        # The recording is finalized first but its failure is captured rather
+        # than raised here, so cleanup, server shutdown, and the transcript still
+        # run; a captured failure is re-raised after teardown (see below).
+        try:
             produced = await recorder.stop_and_save(recording_path)
             logger.info("recording finalized: %s", produced)
+        except Exception as exc:
+            finalize_error = exc
+            logger.error("recording finalization failed: %s", exc)
         with contextlib.suppress(Exception):
             await recorder.cleanup()
         with contextlib.suppress(Exception):
@@ -718,6 +907,11 @@ async def run_self_play(
                 result_reason=result_reason,
                 generated_at=now,
             )
+
+    # Reached only when the game body did not raise. A finalization failure
+    # captured during teardown is re-raised here so it propagates to the caller.
+    if finalize_error is not None:
+        raise finalize_error
 
     summary = {
         "recording": recording_path,

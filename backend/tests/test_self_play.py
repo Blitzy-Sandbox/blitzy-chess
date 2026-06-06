@@ -28,6 +28,7 @@ The chess facts used below are verified and fixed: the Fool's-mate line
 
 import re
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -546,5 +547,220 @@ async def test_run_self_play_orchestrates_with_mocks(tmp_path, monkeypatch) -> N
     # The transcript was written next to the recording as a UTF-8 .md file.
     transcript = summary["transcript"]
     assert transcript.suffix == ".md"
+    assert transcript.exists()
+    assert transcript.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Recording finalization tests (Constraint 14: a real MP4, never mislabeled WebM)
+# ---------------------------------------------------------------------------
+# A minimal ISO base-media (MP4) header: a 'ftyp' box with its type at bytes 4-8.
+_MP4_FTYP_BYTES = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+# The EBML signature a WebM/Matroska file starts with (it has no 'ftyp' box).
+_WEBM_BYTES = b"\x1aE\xdf\xa3\x01\x00\x00\x00\x00\x00\x00\x1f"
+
+
+def _make_recorder(ffmpeg_resolver):
+    """Build a BrowserRecorder with an injected ffmpeg resolver (no browser)."""
+    return runner.BrowserRecorder(
+        url="http://127.0.0.1:8000/self-play", ffmpeg_resolver=ffmpeg_resolver
+    )
+
+
+def test_is_valid_mp4_accepts_ftyp_and_rejects_webm_and_missing(tmp_path) -> None:
+    """``_is_valid_mp4`` recognizes a real MP4 ``ftyp`` box and rejects WebM."""
+    mp4 = tmp_path / "real.mp4"
+    mp4.write_bytes(_MP4_FTYP_BYTES)
+    webm = tmp_path / "actually.webm"
+    webm.write_bytes(_WEBM_BYTES)
+
+    assert runner._is_valid_mp4(mp4) is True
+    assert runner._is_valid_mp4(webm) is False
+    assert runner._is_valid_mp4(tmp_path / "missing.mp4") is False
+
+
+def test_ffmpeg_supports_mp4_parses_muxers(monkeypatch) -> None:
+    """``_ffmpeg_supports_mp4`` is True only when an MP4 muxer is advertised."""
+    with_mp4 = (
+        "Muxers:\n  E mov   QuickTime / MOV\n  E mp4   MP4 (MPEG-4 Part 14)\n  E webm  WebM\n"
+    )
+    webm_only = "Muxers:\n  E image2  image2 sequence\n  E webm    WebM\n"
+
+    monkeypatch.setattr(
+        runner,
+        "_run_ffmpeg",
+        lambda args, **kw: SimpleNamespace(returncode=0, stdout=with_mp4, stderr=""),
+    )
+    assert runner._ffmpeg_supports_mp4("ffmpeg") is True
+
+    # The bundled Playwright build advertises only WebM and image muxers.
+    monkeypatch.setattr(
+        runner,
+        "_run_ffmpeg",
+        lambda args, **kw: SimpleNamespace(returncode=0, stdout=webm_only, stderr=""),
+    )
+    assert runner._ffmpeg_supports_mp4("ffmpeg") is False
+
+    # A non-zero probe exit means the binary cannot be trusted.
+    monkeypatch.setattr(
+        runner,
+        "_run_ffmpeg",
+        lambda args, **kw: SimpleNamespace(returncode=1, stdout=with_mp4, stderr="boom"),
+    )
+    assert runner._ffmpeg_supports_mp4("ffmpeg") is False
+
+    # A failure to even launch ffmpeg is treated as "not capable".
+    def boom(args, **kwargs):
+        raise OSError("cannot exec ffmpeg")
+
+    monkeypatch.setattr(runner, "_run_ffmpeg", boom)
+    assert runner._ffmpeg_supports_mp4("ffmpeg") is False
+
+
+def test_discover_mp4_capable_ffmpeg_prefers_system_then_bundled_then_none(monkeypatch) -> None:
+    """Discovery prefers a capable system ffmpeg, then a capable bundled one, else None."""
+    system_path = "/usr/bin/ffmpeg"
+    bundled_capable = "/cache/ms-playwright/ffmpeg-1/ffmpeg-linux"
+    bundled_incapable = "/cache/ms-playwright/ffmpeg-2/ffmpeg-linux"
+
+    # Only the system path and one bundled path are MP4-capable.
+    monkeypatch.setattr(
+        runner, "_ffmpeg_supports_mp4", lambda f: f in {system_path, bundled_capable}
+    )
+
+    # A capable system ffmpeg on PATH is chosen first.
+    monkeypatch.setattr(runner.shutil, "which", lambda name: system_path)
+    monkeypatch.setattr(runner, "_bundled_ffmpeg_candidates", lambda: [])
+    assert runner._discover_mp4_capable_ffmpeg() == system_path
+
+    # No system ffmpeg: a capable bundled binary is used.
+    monkeypatch.setattr(runner.shutil, "which", lambda name: None)
+    monkeypatch.setattr(runner, "_bundled_ffmpeg_candidates", lambda: [Path(bundled_capable)])
+    assert runner._discover_mp4_capable_ffmpeg() == bundled_capable
+
+    # No system ffmpeg and the only bundled binary cannot mux MP4 (the offline
+    # case in this environment) -> None, so finalization will fail loudly.
+    monkeypatch.setattr(runner, "_bundled_ffmpeg_candidates", lambda: [Path(bundled_incapable)])
+    assert runner._discover_mp4_capable_ffmpeg() is None
+
+
+def test_finalize_recording_raises_when_no_capable_ffmpeg(tmp_path) -> None:
+    """No MP4-capable ffmpeg -> raise; never write a mislabeled .mp4."""
+    webm = tmp_path / "rec.webm"
+    webm.write_bytes(_WEBM_BYTES)
+    target = tmp_path / "out.mp4"
+    recorder = _make_recorder(lambda: None)
+
+    with pytest.raises(runner.RecordingFinalizationError):
+        recorder._finalize_recording(str(webm), target)
+
+    # The defining guarantee: no file under the .mp4 name was produced.
+    assert not target.exists()
+    # The WebM source is left in place for recovery.
+    assert webm.exists()
+
+
+def test_finalize_recording_transcodes_with_capable_ffmpeg(tmp_path, monkeypatch) -> None:
+    """A capable ffmpeg transcodes the WebM into a valid MP4 at the target."""
+    webm = tmp_path / "rec.webm"
+    webm.write_bytes(_WEBM_BYTES)
+    target = tmp_path / "out.mp4"
+
+    def fake_run(args, **kwargs):
+        # ffmpeg writes the output (the last argument); emulate a real MP4.
+        Path(args[-1]).write_bytes(_MP4_FTYP_BYTES)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_run_ffmpeg", fake_run)
+    recorder = _make_recorder(lambda: "ffmpeg")
+
+    produced = recorder._finalize_recording(str(webm), target)
+
+    assert produced == target
+    assert target.exists()
+    assert runner._is_valid_mp4(target)
+
+
+def test_finalize_recording_raises_on_transcode_failure(tmp_path, monkeypatch) -> None:
+    """A non-zero ffmpeg exit raises and leaves no output file behind."""
+    webm = tmp_path / "rec.webm"
+    webm.write_bytes(_WEBM_BYTES)
+    target = tmp_path / "out.mp4"
+
+    monkeypatch.setattr(
+        runner,
+        "_run_ffmpeg",
+        lambda args, **kw: SimpleNamespace(returncode=1, stdout="", stderr="encode error"),
+    )
+    recorder = _make_recorder(lambda: "ffmpeg")
+
+    with pytest.raises(runner.RecordingFinalizationError):
+        recorder._finalize_recording(str(webm), target)
+    assert not target.exists()
+
+
+def test_finalize_recording_raises_on_invalid_output_container(tmp_path, monkeypatch) -> None:
+    """ffmpeg exits 0 but emits non-MP4 bytes -> raise and remove the file."""
+    webm = tmp_path / "rec.webm"
+    webm.write_bytes(_WEBM_BYTES)
+    target = tmp_path / "out.mp4"
+
+    def fake_run(args, **kwargs):
+        # Simulate a WebM-only ffmpeg that exits 0 but writes a WebM container.
+        Path(args[-1]).write_bytes(_WEBM_BYTES)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner, "_run_ffmpeg", fake_run)
+    recorder = _make_recorder(lambda: "ffmpeg")
+
+    with pytest.raises(runner.RecordingFinalizationError):
+        recorder._finalize_recording(str(webm), target)
+    # The mislabeled output was removed, never returned.
+    assert not target.exists()
+
+
+def test_finalize_recording_raises_when_no_webm(tmp_path) -> None:
+    """A missing WebM source raises rather than producing an empty .mp4."""
+    target = tmp_path / "out.mp4"
+    recorder = _make_recorder(lambda: "ffmpeg")
+
+    with pytest.raises(runner.RecordingFinalizationError):
+        recorder._finalize_recording(None, target)
+    assert not target.exists()
+
+
+async def test_run_self_play_surfaces_finalization_error(tmp_path, monkeypatch) -> None:
+    """A finalization failure propagates after teardown; the transcript still writes."""
+    recording_path = tmp_path / "self_play_20240101_120000.mp4"
+
+    monkeypatch.setattr(runner.config, "self_play_recording_path", lambda now=None: recording_path)
+    monkeypatch.setattr(runner, "load_book", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "open_tablebase", lambda *a, **k: None)
+
+    sample = _make_annotation(
+        ply=1, color="White", tier="Hard", san="e4", elapsed_s=5.0, score_cp_white=20
+    )
+
+    async def fake_play(**kwargs):
+        return [sample], "0-1", "checkmate"
+
+    monkeypatch.setattr(runner, "play_self_play_game", fake_play)
+
+    server = AsyncMock()
+    recorder = AsyncMock()
+    recorder.stop_and_save.side_effect = runner.RecordingFinalizationError("no MP4-capable ffmpeg")
+
+    with pytest.raises(runner.RecordingFinalizationError):
+        await runner.run_self_play(now=FIXED_GENERATED_AT, server=server, recorder=recorder)
+
+    # Teardown still ran despite the loud failure.
+    assert server.start.await_count == 1
+    assert recorder.start.await_count == 1
+    assert recorder.stop_and_save.await_count == 1
+    assert recorder.cleanup.await_count == 1
+    assert server.stop.await_count == 1
+
+    # The transcript was still written next to the (failed) recording target.
+    transcript = runner.transcript_path_for(recording_path)
     assert transcript.exists()
     assert transcript.read_text(encoding="utf-8")
