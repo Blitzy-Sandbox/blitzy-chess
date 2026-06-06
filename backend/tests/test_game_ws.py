@@ -30,6 +30,9 @@ from types import SimpleNamespace
 
 import chess
 import pytest
+from starlette.websockets import WebSocketDisconnect, WebSocketState
+
+from chess_ai.api.game_ws import _CLOSED_SOCKET_MESSAGE, _send_or_disconnect
 
 
 class FakeSearcher:
@@ -234,3 +237,80 @@ def test_health_ok(client):
     """The REST health probe answers 200 via the same synchronous client."""
     response = client.get("/health")
     assert response.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Disconnect-during-search hygiene (regression for QA finding F-1)
+# ---------------------------------------------------------------------------
+class _RecordingWebSocket:
+    """Minimal ``WebSocket`` stand-in for unit-testing ``_send_or_disconnect``.
+
+    Mimics only what the helper touches: the ``application_state`` attribute and
+    an awaitable ``send_text``. ``send_text`` records each payload, or raises a
+    preconfigured exception to simulate a socket that has been closed (abruptly
+    or gracefully) while the AI was searching off the event loop.
+    """
+
+    def __init__(self, *, application_state, send_exc=None):
+        self.application_state = application_state
+        self._send_exc = send_exc
+        self.sent: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        if self._send_exc is not None:
+            raise self._send_exc
+        self.sent.append(data)
+
+
+async def test_send_or_disconnect_skips_send_when_already_disconnected():
+    """F-1: a socket already flipped to DISCONNECTED unwinds as a disconnect.
+
+    When the ai_thinking drain (or an earlier send) has already observed the
+    client's disconnect, Starlette has set ``application_state`` to
+    ``DISCONNECTED``. The helper must NOT attempt the doomed post-search send
+    (which would raise the bare closed-socket ``RuntimeError``); it raises a
+    benign ``WebSocketDisconnect`` instead, which the endpoint logs at INFO.
+    """
+    ws = _RecordingWebSocket(application_state=WebSocketState.DISCONNECTED)
+    with pytest.raises(WebSocketDisconnect):
+        await _send_or_disconnect(ws, '{"type": "state"}')
+    # The doomed send must never be attempted on a disconnected socket.
+    assert ws.sent == []
+
+
+async def test_send_or_disconnect_reclassifies_closed_socket_runtimeerror():
+    """F-1: the closed-socket ``RuntimeError`` is reclassified as a disconnect.
+
+    If an abrupt drop races the state guard so the send itself raises Starlette's
+    closed-socket ``RuntimeError``, the helper reclassifies it as a benign
+    ``WebSocketDisconnect`` rather than letting it surface as an ERROR-level
+    traceback through the endpoint's broad ``except Exception``.
+    """
+    closed = RuntimeError(_CLOSED_SOCKET_MESSAGE)
+    ws = _RecordingWebSocket(application_state=WebSocketState.CONNECTED, send_exc=closed)
+    with pytest.raises(WebSocketDisconnect):
+        await _send_or_disconnect(ws, '{"type": "state"}')
+
+
+async def test_send_or_disconnect_propagates_genuine_runtimeerror():
+    """F-1: a genuine ``RuntimeError`` is NOT masked as a disconnect.
+
+    Only the closed-socket runtime error is benign. Any other ``RuntimeError`` is
+    an unexpected failure and must propagate unchanged so the endpoint can still
+    log it as an error (the broad ``except Exception`` stays meaningful).
+    """
+    genuine = RuntimeError("genuine unexpected failure")
+    ws = _RecordingWebSocket(application_state=WebSocketState.CONNECTED, send_exc=genuine)
+    with pytest.raises(RuntimeError) as excinfo:
+        await _send_or_disconnect(ws, '{"type": "state"}')
+    # It must remain the genuine error, never reclassified to a disconnect.
+    assert not isinstance(excinfo.value, WebSocketDisconnect)
+    assert "genuine unexpected failure" in str(excinfo.value)
+
+
+async def test_send_or_disconnect_sends_when_connected():
+    """F-1: the happy path is unchanged -- a connected socket sends normally."""
+    ws = _RecordingWebSocket(application_state=WebSocketState.CONNECTED)
+    payload = '{"type": "state"}'
+    await _send_or_disconnect(ws, payload)
+    assert ws.sent == [payload]

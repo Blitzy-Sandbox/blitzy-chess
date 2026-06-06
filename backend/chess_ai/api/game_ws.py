@@ -52,6 +52,7 @@ import uuid
 
 import chess
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from chess_ai.config import MIN_AI_DELAY_MS, get_tier
 from chess_ai.engine.search import Searcher, SearchInfo, SearchLimits, SearchResult
@@ -94,6 +95,14 @@ _MODE = "ai"
 # confused with a real ``SearchInfo`` payload.
 _SENTINEL = object()
 
+# Substring of the ``RuntimeError`` Starlette raises from ``WebSocket.send`` when
+# the connection is already in the ``DISCONNECTED`` state (its message is
+# ``'Cannot call "send" once a close message has been sent.'``). Matching on this
+# substring lets :func:`_send_or_disconnect` reclassify that one benign,
+# closed-socket condition as a normal disconnect while letting every other
+# ``RuntimeError`` (a genuine, unexpected failure) propagate unchanged.
+_CLOSED_SOCKET_MESSAGE = 'Cannot call "send" once a close message has been sent.'
+
 
 # ---------------------------------------------------------------------------
 # Small pure helpers
@@ -132,6 +141,66 @@ def _san_pv(base: chess.Board, pv: list[chess.Move]) -> list[str]:
         rendered.append(board.san(move))
         board.push(move)
     return rendered
+
+
+# ---------------------------------------------------------------------------
+# Resilient send
+# ---------------------------------------------------------------------------
+async def _send_or_disconnect(websocket: WebSocket, payload: str) -> None:
+    """Send ``payload`` on ``websocket``, treating a closed socket as a disconnect.
+
+    The AI's reply is produced by a search that runs off the event loop
+    (``asyncio.to_thread``), during which the handler is **not** reading the
+    socket. A client that disconnects in that window is an expected, benign
+    condition -- the user is gone and their game is over -- but the search still
+    finishes and the handler then tries to send the resulting state.
+
+    By that point the socket is already closed. The streamed ``ai_thinking``
+    drain is usually the first to notice: its send fails with an ``OSError`` that
+    Starlette turns into a :class:`WebSocketDisconnect`, and in doing so it flips
+    the connection's ``application_state`` to ``DISCONNECTED``. A subsequent send
+    on a ``DISCONNECTED`` socket no longer raises :class:`WebSocketDisconnect`;
+    instead Starlette raises a bare ``RuntimeError('Cannot call "send" once a
+    close message has been sent.')`` -- which, left unguarded, escapes the
+    endpoint's ``except WebSocketDisconnect`` handler and is logged as an
+    unexpected error with a full traceback (QA finding F-1).
+
+    This helper normalizes that benign condition back into a
+    :class:`WebSocketDisconnect`, which the endpoint already handles as an
+    ordinary disconnect (logged at INFO, no traceback), in two ways:
+
+    * **Proactively** -- if the connection is no longer ``CONNECTED`` (the drain,
+      or an earlier send, already observed the drop) it raises
+      :class:`WebSocketDisconnect` without attempting the doomed send.
+    * **Defensively** -- if an abrupt drop races the state check above so that the
+      send itself raises, only the closed-socket ``RuntimeError`` (matched on
+      :data:`_CLOSED_SOCKET_MESSAGE`) is reclassified; any other ``RuntimeError``
+      is a genuine, unexpected failure and is re-raised unchanged so the endpoint
+      can still surface it as an error.
+
+    Args:
+        websocket: The connection to send on.
+        payload: The already-serialized JSON text to send.
+
+    Raises:
+        WebSocketDisconnect: If the socket is closed (proactively detected) or the
+            send fails because it is closed. Propagates to the endpoint's
+            ``except WebSocketDisconnect`` path.
+        RuntimeError: Re-raised unchanged for any non-closed-socket runtime error.
+    """
+    # Proactive guard: a prior send (typically the ai_thinking drain) already saw
+    # the disconnect and flipped the connection to DISCONNECTED. Don't attempt the
+    # doomed send; unwind through the endpoint's benign disconnect path instead.
+    if websocket.application_state != WebSocketState.CONNECTED:
+        raise WebSocketDisconnect(code=1006)
+    try:
+        await websocket.send_text(payload)
+    except RuntimeError as exc:
+        # Defensive: the socket closed between the guard and the send. Reclassify
+        # ONLY the closed-socket RuntimeError; let any genuine RuntimeError through.
+        if _CLOSED_SOCKET_MESSAGE in str(exc):
+            raise WebSocketDisconnect(code=1006) from exc
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +510,11 @@ async def _maybe_finish(websocket: WebSocket, board: chess.Board) -> bool:
     game_over = _check_game_over(board)
     if game_over is None:
         return False
-    await websocket.send_text(protocol.serialize(game_over))
+    # This runs immediately after the AI's move (the same window in which the
+    # client may have disconnected during the off-loop search), so route it
+    # through ``_send_or_disconnect`` to treat a closed socket as a benign
+    # disconnect rather than an unexpected error (QA finding F-1).
+    await _send_or_disconnect(websocket, protocol.serialize(game_over))
     metrics.record_game_result(game_over.result, _MODE)
     logger.info("game_over", result=game_over.result, winner=game_over.winner)
     return True
@@ -592,5 +665,9 @@ async def _play_ai_move(
     )
 
     # Broadcast the new authoritative state. The caller checks for a terminal
-    # position after this returns.
-    await websocket.send_text(protocol.serialize(_build_state(board, move_history)))
+    # position after this returns. If the client disconnected while the AI was
+    # thinking (a benign condition during the off-loop search), the socket is
+    # already closed; ``_send_or_disconnect`` turns that into a normal
+    # ``WebSocketDisconnect`` the endpoint handles at INFO instead of letting a
+    # closed-socket ``RuntimeError`` surface as an error (QA finding F-1).
+    await _send_or_disconnect(websocket, protocol.serialize(_build_state(board, move_history)))
