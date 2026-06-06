@@ -33,16 +33,20 @@
  */
 import { useEffect, useRef } from 'react';
 
+import type { StateMessage } from '../types';
+
 /**
  * Props for {@link MoveHistory}.
  */
 interface MoveHistoryProps {
   /**
    * Moves in play order as SAN strings:
-   * `[whiteMove1, blackMove1, whiteMove2, ...]`. An empty list renders the
-   * start-of-game placeholder.
+   * `[whiteMove1, blackMove1, whiteMove2, ...]`. Typed from the shared
+   * frontend/backend contract (`StateMessage['move_history']`) so it cannot
+   * drift from the wire protocol. An empty list renders the start-of-game
+   * placeholder.
    */
-  moves: string[];
+  moves: StateMessage['move_history'];
 }
 
 /**
@@ -90,20 +94,15 @@ export function MoveHistory({ moves }: MoveHistoryProps) {
     rows.push({ number: i / 2 + 1, white: moves[i], black: moves[i + 1] });
   }
 
-  // BLITZY [A11Y]: the muted `text-gray-500` used for move numbers and the
-  // empty-state placeholder computes below WCAG AA 4.5:1 for small secondary
-  // text on the dark panel. It is kept per the design source (deliberate
-  // secondary-text treatment) and flagged for designer review rather than
-  // silently darkened.
   return (
-    <div ref={containerRef} className="move-history-scroll max-h-[220px] rounded bg-black/20 p-2">
+    <div ref={containerRef} className="move-history-scroll max-h-56 rounded bg-panel-inset p-2">
       {rows.length === 0 ? (
-        <p className="text-sm text-gray-500">No moves yet.</p>
+        <p className="text-sm text-secondary">No moves yet.</p>
       ) : (
         <ol aria-label="Move history" className="text-sm">
           {rows.map((row) => (
             <li key={row.number} className="flex gap-2 py-0.5">
-              <span className="w-7 shrink-0 text-right text-gray-500">{row.number}.</span>
+              <span className="w-7 shrink-0 text-right text-secondary">{row.number}.</span>
               <span className="w-16 font-medium text-gray-100">{row.white}</span>
               {row.black && <span className="w-16 font-medium text-gray-100">{row.black}</span>}
             </li>

@@ -9,13 +9,14 @@ a set of best-effort positive-path checks:
   CI/test environments. ``load_book`` for a missing, ``None``, empty, or corrupt
   path therefore MUST return ``None`` and MUST NEVER raise. These tests are the
   contract that holds in every environment and are written first.
-* **Positive path (best-effort).** When a book *can* be constructed, probing
-  returns a legal weighted-random move, ``has_moves`` / ``list_moves`` report
-  membership, weighted selection is deterministic under a seeded RNG, and
-  ``close`` is idempotent. Each of these builds a tiny temporary Polyglot book on
-  the fly; if construction is not possible in the host environment the test
-  ``pytest.skip``\\ s rather than fails, so the mandatory contract above still
-  passes everywhere.
+* **Positive path (enforced).** Each positive-path test builds a tiny temporary
+  Polyglot book in-process (``struct``-packed records keyed by
+  :func:`chess.polyglot.zobrist_hash`) and then asserts that probing returns a
+  legal weighted-random move, ``has_moves`` / ``list_moves`` report membership,
+  weighted selection is deterministic under a seeded RNG, and ``close`` is
+  idempotent. Because the book is generated locally with no external dependency,
+  construction and loading MUST succeed; a failure is a product defect and fails
+  the test rather than being hidden as a skip.
 
 A Polyglot ``.bin`` file is a key-sorted sequence of 16-byte big-endian records
 ``key (uint64) | move (uint16) | weight (uint16) | learn (uint32)`` where the key
@@ -36,7 +37,6 @@ from pathlib import Path
 
 import chess
 import chess.polyglot
-import pytest
 
 from chess_ai.engine.book import OpeningBook, load_book
 
@@ -95,21 +95,21 @@ def _write_polyglot_book(path: Path, entries: list[tuple[chess.Board, chess.Move
 def _load_temp_book(
     tmp_path: Path, entries: list[tuple[chess.Board, chess.Move, int]]
 ) -> OpeningBook:
-    """Build and load a temporary Polyglot book, or skip the test.
+    """Build and load a temporary, in-process Polyglot book.
 
-    The graceful-absent tests are the mandatory contract; the positive-path
-    tests are best-effort. If a temporary book cannot be constructed or loaded in
-    this environment, skip rather than fail so the suite stays green everywhere.
+    The book is generated entirely in-process: the records are ``struct``-packed
+    and keyed with :func:`chess.polyglot.zobrist_hash`, both of which are pure
+    Python with no external dependency or environment-specific behavior.
+    Construction and loading must therefore SUCCEED, so any failure here -- a
+    raised exception, or ``load_book`` returning ``None`` for a valid generated
+    book -- is a product defect and is allowed to fail the test rather than be
+    hidden as a skip. (Skips are reserved for the truly optional, downloaded real
+    book artifact, which the graceful-absent contract tests cover separately.)
     """
     path = tmp_path / "book.bin"
-    book: OpeningBook | None = None
-    try:
-        _write_polyglot_book(path, entries)
-        book = load_book(str(path))
-    except Exception as exc:  # construction is environment-dependent; never fail here.
-        pytest.skip(f"could not construct a temporary Polyglot book: {exc}")
-    if book is None:
-        pytest.skip("temporary Polyglot book could not be loaded in this environment")
+    _write_polyglot_book(path, entries)
+    book = load_book(str(path))
+    assert book is not None, "load_book returned None for a valid generated Polyglot book"
     return book
 
 

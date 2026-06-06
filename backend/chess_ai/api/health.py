@@ -7,8 +7,10 @@ startup completion and which optional resources are loaded, returning 503 until
 the application is ready.
 
 This module handles no chess moves. Readiness reads ``request.app.state``
-defensively, so a minimal or test application without a configured lifespan
-still answers every route.
+defensively and FAILS CLOSED: a minimal or test application without a
+configured lifespan still answers every route, but the readiness probe reports
+not-ready (HTTP 503) until application startup has explicitly marked the app
+ready, so an unwired or half-started process never masquerades as ready.
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ from chess_ai.observability.logging_config import get_logger
 logger = get_logger(__name__)
 
 __all__ = ["router"]
+
+# Sentinel distinguishing "application startup never set a readiness flag" from
+# an explicit ``request.app.state.ready`` value. A missing flag must fail closed
+# (report not-ready) rather than defaulting to ready.
+_READINESS_UNSET = object()
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +44,13 @@ router = APIRouter(tags=["health"])
 def _readiness_payload(request: Request) -> tuple[dict, int]:
     """Compute the readiness body and its HTTP status code.
 
-    Reads application state defensively: a missing attribute degrades to its
-    documented default instead of raising. The opening book and Syzygy tables
-    are optional downloaded artifacts, so they are reported as informational
-    booleans and never change the ready flag.
+    Reads application state defensively and FAILS CLOSED. Readiness is reported
+    only when application startup has EXPLICITLY set ``request.app.state.ready``
+    to a truthy value. A missing flag means startup has not run or did not
+    complete, so the probe conservatively reports not-ready (HTTP 503) instead of
+    assuming readiness. The opening book and Syzygy tables are optional
+    downloaded artifacts, so they are reported as informational booleans and
+    never change the ready flag.
 
     Args:
         request: The incoming request, used to read ``request.app.state``.
@@ -49,7 +59,11 @@ def _readiness_payload(request: Request) -> tuple[dict, int]:
         A ``(body, status_code)`` pair: the JSON-serializable body and the HTTP
         status code, 200 when ready and 503 otherwise.
     """
-    ready = bool(getattr(request.app.state, "ready", True))
+    state_ready = getattr(request.app.state, "ready", _READINESS_UNSET)
+    startup_initialized = state_ready is not _READINESS_UNSET
+    # Fail closed: only an explicit truthy flag reports ready. A missing flag
+    # (startup not run or incomplete) stays not-ready by construction.
+    ready = bool(state_ready) if startup_initialized else False
     opening_book_loaded = getattr(request.app.state, "opening_book", None) is not None
     tablebase_loaded = getattr(request.app.state, "tablebase", None) is not None
 
@@ -58,9 +72,15 @@ def _readiness_payload(request: Request) -> tuple[dict, int]:
         "opening_book": opening_book_loaded,
         "tablebase": tablebase_loaded,
     }
+    # Surface WHY the probe is not ready without leaking internal state: a missing
+    # readiness flag means application startup has not initialized it yet.
+    if not startup_initialized:
+        body["startup_state"] = "missing"
+
     logger.debug(
         "readiness_check",
         ready=ready,
+        startup_initialized=startup_initialized,
         opening_book=opening_book_loaded,
         tablebase=tablebase_loaded,
     )

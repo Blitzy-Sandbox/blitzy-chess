@@ -20,8 +20,15 @@ The download is:
                 non-zero on a hard error so ``make`` surfaces the failure;
 * atomic      - each file lands in a temporary file and is renamed into place
                 only after a complete download;
-* dependency-light - standard library only (``urllib``); the Syzygy data format
-                itself is handled by the engine, not by this fetcher.
+* verified    - when an md5 manifest is available (``--checksums`` /
+                ``SYZYGY_CHECKSUMS`` / an auto-discovered ``checksum.md5``), each
+                file's digest is checked before install and a mismatch fails
+                closed; a custom ``--base-url`` without a manifest is refused
+                unless ``--allow-unverified`` is given. This matters because
+                python-chess warns that probing a corrupt or maliciously crafted
+                tablebase is undefined behavior;
+* dependency-light - standard library only (``urllib`` + ``hashlib``); the Syzygy
+                data format itself is handled by the engine, not by this fetcher.
 
 The full 3-4-5 set is roughly 1 GiB. Use ``--minimal`` for a tiny 3-piece subset,
 ``--wdl-only`` to halve the size, or ``--max-files N`` to cap a quick download.
@@ -29,12 +36,13 @@ The full 3-4-5 set is roughly 1 GiB. Use ``--minimal`` for a tiny 3-piece subset
 Override the source or destination without editing this file::
 
     SYZYGY_BASE_URL=<url> SYZYGY_DIR=<path> python backend/scripts/download_syzygy.py
-    python backend/scripts/download_syzygy.py --dest <path> --minimal --force
+    python backend/scripts/download_syzygy.py --dest <path> --checksums <md5> --minimal --force
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import socket
@@ -118,25 +126,75 @@ def list_remote_tables(base_url: str, subdir: str, extension: str, *, timeout: i
     return sorted(names)
 
 
-def download_file(url: str, dest: Path, *, timeout: int) -> int:
-    """Download ``url`` to ``dest`` atomically. Return the byte count.
+def load_checksums(path: Path) -> dict[str, str]:
+    """Parse an ``md5sum``-format manifest into ``{basename: hexdigest}``.
+
+    Accepts lines of the form ``<hexdigest>  <filename>`` (the GNU text-mode
+    separator) or ``<hexdigest> *<filename>`` (binary mode). Blank lines and
+    ``#`` comments are ignored. Only the basename of each filename is kept, so a
+    manifest listing ``3-4-5-wdl/KQvK.rtbw`` still matches a fetched ``KQvK.rtbw``.
+
+    Raises:
+        RuntimeError: If the file cannot be read or holds no usable entries.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RuntimeError(f"could not read checksum manifest {path}: {exc}") from exc
+    checksums: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts
+        checksums[os.path.basename(name.lstrip("*").strip())] = digest.lower()
+    if not checksums:
+        raise RuntimeError(f"checksum manifest {path} contained no usable entries")
+    return checksums
+
+
+def download_file(url: str, dest: Path, *, timeout: int, expected_md5: str | None = None) -> int:
+    """Download ``url`` to ``dest`` atomically, verifying integrity. Return byte count.
+
+    The bytes stream to a temporary file while an MD5 digest is computed. When
+    ``expected_md5`` is given, the digest MUST match before the file is moved into
+    place; a mismatch fails closed (the destination is left untouched), because
+    python-chess warns that probing a corrupt or maliciously crafted tablebase is
+    undefined behavior. Directory and temp-file creation run inside the handled
+    block, so filesystem failures surface as an actionable ``RuntimeError`` --
+    never a raw traceback -- and any partial temp file is cleaned up.
 
     Raises ``RuntimeError`` with an actionable message on any failure.
     """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".part", dir=dest.parent)
-    tmp_path = Path(tmp_name)
-    total = 0
+    tmp_path: Path | None = None
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".part", dir=dest.parent)
+        tmp_path = Path(tmp_name)
+        digest = hashlib.md5()
+        total = 0
         with _open(url, timeout) as response, os.fdopen(tmp_fd, "wb") as tmp_file:
             while True:
                 chunk = response.read(256 * 1024)
                 if not chunk:
                     break
                 tmp_file.write(chunk)
+                digest.update(chunk)
                 total += len(chunk)
         if total == 0:
             raise RuntimeError("the download produced an empty file")
+        # Integrity gate: verify BEFORE the file is moved into place so a corrupt
+        # or tampered table can never be installed (and later probed).
+        if expected_md5 is not None:
+            actual_md5 = digest.hexdigest()
+            if actual_md5.lower() != expected_md5.strip().lower():
+                raise RuntimeError(
+                    f"checksum mismatch: expected MD5 {expected_md5.strip().lower()} but the "
+                    f"data hashes to {actual_md5}; the table was NOT installed"
+                )
         os.replace(tmp_path, dest)
         return total
     except urllib.error.HTTPError as exc:
@@ -148,7 +206,7 @@ def download_file(url: str, dest: Path, *, timeout: int) -> int:
     except OSError as exc:
         raise RuntimeError(f"write error: {exc}") from exc
     finally:
-        if tmp_path.exists():
+        if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
@@ -229,13 +287,56 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"per-file network timeout in seconds (default: {DEFAULT_TIMEOUT_S}).",
     )
     parser.add_argument("--quiet", action="store_true", help="suppress progress output.")
+    parser.add_argument(
+        "--checksums",
+        default=None,
+        help="path to an md5 manifest ('<hex>  <file>' lines), verified before install "
+        "(env: SYZYGY_CHECKSUMS; else a 'checksum.md5' in the dest dir is auto-discovered).",
+    )
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="permit a custom --base-url with no checksum manifest (bypasses integrity checks).",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     dest_dir = Path(args.dest).expanduser() if args.dest else resolve_default_dest()
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"error: could not create the tables directory {dest_dir}: {exc}", file=sys.stderr)
+        return 1
+
+    # Resolve an integrity manifest: explicit --checksums / SYZYGY_CHECKSUMS wins,
+    # otherwise auto-discover a 'checksum.md5' already sitting in the destination.
+    checksums: dict[str, str] = {}
+    checksums_path = args.checksums or os.environ.get("SYZYGY_CHECKSUMS")
+    if checksums_path:
+        try:
+            checksums = load_checksums(Path(checksums_path).expanduser())
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    else:
+        auto = dest_dir / "checksum.md5"
+        if auto.is_file():
+            try:
+                checksums = load_checksums(auto)
+            except RuntimeError as exc:
+                print(f"warning: ignoring unreadable {auto}: {exc}", file=sys.stderr)
+
+    using_default_source = _normalize_base(args.base_url) == _normalize_base(DEFAULT_BASE_URL)
+    if not checksums and not using_default_source and not args.allow_unverified:
+        print(
+            "error: refusing to download from a custom --base-url without a checksum manifest; "
+            "provide --checksums <md5 manifest> (or set SYZYGY_CHECKSUMS), or pass "
+            "--allow-unverified to bypass this check explicitly.",
+            file=sys.stderr,
+        )
+        return 2
 
     if not args.quiet:
         print(
@@ -267,12 +368,24 @@ def main(argv: list[str] | None = None) -> int:
         if dest.exists() and dest.stat().st_size > 0 and not args.force:
             skipped += 1
             continue
+        expected_md5 = checksums.get(name)
+        # On a custom source, a file not covered by the manifest is refused unless
+        # explicitly overridden, so an unverified table is never installed.
+        if expected_md5 is None and not using_default_source and not args.allow_unverified:
+            failed += 1
+            print(
+                f"  [{index}/{len(plan)}] {name}  FAILED: no checksum in manifest for a "
+                "custom source (use --allow-unverified to override).",
+                file=sys.stderr,
+            )
+            continue
         try:
-            size = download_file(url, dest, timeout=args.timeout)
+            size = download_file(url, dest, timeout=args.timeout, expected_md5=expected_md5)
             downloaded += 1
             total_bytes += size
             if not args.quiet:
-                print(f"  [{index}/{len(plan)}] {name}  ({_human_size(size)})")
+                suffix = "  verified" if expected_md5 is not None else ""
+                print(f"  [{index}/{len(plan)}] {name}  ({_human_size(size)}){suffix}")
         except RuntimeError as exc:
             failed += 1
             print(f"  [{index}/{len(plan)}] {name}  FAILED: {exc}", file=sys.stderr)

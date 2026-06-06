@@ -80,6 +80,13 @@ TT_LOWER: int = 1
 # The stored score is an upper bound (a fail-low node).
 TT_UPPER: int = 2
 
+# Approximate worst-case byte footprint of one stored transposition record in
+# CPython (a slotted ``_TTEntry`` plus its reference slot in the bucket array).
+# The table derives its bucket count from this so ``num_buckets`` honors BOTH the
+# entry cap and the memory budget: ``TT_SIZE_MB`` (256) * 1 MiB / 256 B is
+# exactly ``TT_MAX_ENTRIES`` (2**20), so the configured caps agree by design.
+_TT_BYTES_PER_ENTRY: int = 256
+
 
 # ---------------------------------------------------------------------------
 # Pruning and timing parameters
@@ -233,9 +240,13 @@ class SearchResult:
     from_tablebase: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class _TTEntry:
     """A single transposition-table record.
+
+    Declared with ``slots=True`` so each record carries no per-instance
+    ``__dict__``; this keeps the per-entry footprint small enough that the
+    fixed-size :class:`TranspositionTable` stays within its ``TT_SIZE_MB`` budget.
 
     Attributes:
         key: The full 64-bit Zobrist key the record was stored under.
@@ -253,29 +264,50 @@ class _TTEntry:
 
 
 class TranspositionTable:
-    """Zobrist-keyed transposition table with a depth-preferred replacement scheme.
+    """Zobrist-keyed transposition table with a fixed-size, memory-bounded store.
 
-    Records are stored in a ``dict`` keyed on the 64-bit Polyglot Zobrist
-    integer. An existing record is overwritten when the incoming record is at
-    least as deep, or when the incoming record is exact; otherwise the deeper
-    existing record is kept. The number of records is bounded by
-    ``TT_MAX_ENTRIES``: when a new key would exceed the cap the table is cleared,
-    which keeps the footprint within the ``TT_SIZE_MB`` budget by construction.
-    Mate scores are made ply-independent on store and node-relative on probe.
+    Records live in a FIXED-LENGTH bucket array indexed by the low bits of the
+    64-bit Polyglot Zobrist key (``key & (num_buckets - 1)``). The bucket count
+    is the largest power of two that fits BOTH the entry cap (``max_entries``)
+    and the memory budget (``size_mb`` at :data:`_TT_BYTES_PER_ENTRY` bytes per
+    record), so the footprint is bounded by construction -- with the configured
+    defaults (``2**20`` entries, 256 MB) that is exactly ``2**20`` buckets.
+
+    Replacement is depth-preferred and per-bucket: an incoming record overwrites
+    the bucket unless the resident record is a STRICTLY deeper, non-exact entry
+    (which is kept). This rule covers both a same-key refresh and a different-key
+    collision, so the table never grows past its bucket count and never performs
+    the whole-table clear the previous dict-backed implementation used at
+    capacity. Because buckets collide, :meth:`probe` verifies an exact key match
+    before returning a record. Mate scores are made ply-independent on store and
+    node-relative on probe.
     """
 
     def __init__(self, max_entries: int = TT_MAX_ENTRIES, size_mb: int = TT_SIZE_MB) -> None:
-        """Create an empty table.
+        """Create an empty, fixed-size table sized to the entry and memory caps.
+
+        The bucket count honors both caps and is rounded DOWN to a power of two
+        so the index mask (``key & mask``) is exact; with the defaults this is
+        ``2**20`` buckets (an 8 MB pointer array) holding up to ``2**20`` records
+        within the 256 MB budget.
 
         Args:
             max_entries: Hard ceiling on stored records (defaults to the
                 ``chess_ai.config`` cap of ``2**20``).
-            size_mb: The configured memory budget in megabytes, retained for
-                reporting (defaults to the ``chess_ai.config`` value of 256).
+            size_mb: Memory budget in megabytes (defaults to the
+                ``chess_ai.config`` value of 256). Enforced: the bucket count
+                never exceeds ``size_mb * 1 MiB / _TT_BYTES_PER_ENTRY``.
         """
-        self._table: dict[int, _TTEntry] = {}
         self.max_entries: int = max_entries
         self.size_mb: int = size_mb
+        # Honor BOTH the entry cap and the byte budget, then round down to a
+        # power of two so the index mask is exact and overflow is impossible.
+        entries_by_memory = max(1, (size_mb * 1024 * 1024) // _TT_BYTES_PER_ENTRY)
+        budget = max(1, min(max_entries, entries_by_memory))
+        self.num_buckets: int = 1 << (budget.bit_length() - 1)
+        self._mask: int = self.num_buckets - 1
+        self._buckets: list[_TTEntry | None] = [None] * self.num_buckets
+        self._count: int = 0
 
     def store(
         self,
@@ -287,7 +319,11 @@ class TranspositionTable:
         *,
         ply: int = 0,
     ) -> None:
-        """Insert or replace the record for ``key``.
+        """Insert or replace the record in ``key``'s bucket (depth-preferred).
+
+        The resident record is kept only when it is a strictly deeper, non-exact
+        entry; otherwise the incoming record replaces it. This evicts shallower
+        records on collision deterministically and never exceeds the bucket count.
 
         Args:
             key: The 64-bit Zobrist key of the position.
@@ -300,12 +336,15 @@ class TranspositionTable:
             ply: Distance from the search root, used for the mate-score
                 adjustment.
         """
-        existing = self._table.get(key)
+        index = key & self._mask
+        existing = self._buckets[index]
+        # Keep a strictly deeper, non-exact resident; otherwise install the
+        # incoming record (covers same-key refresh and cross-key collision).
         if existing is not None and flag != TT_EXACT and depth < existing.depth:
             return
-        if key not in self._table and len(self._table) >= self.max_entries:
-            self._table.clear()
-        self._table[key] = _TTEntry(key, depth, _score_to_tt(score, ply), flag, move)
+        if existing is None:
+            self._count += 1
+        self._buckets[index] = _TTEntry(key, depth, _score_to_tt(score, ply), flag, move)
 
     def probe(self, key: int, *, ply: int = 0) -> _TTEntry | None:
         """Return the record for ``key`` with its score adjusted to ``ply``.
@@ -317,10 +356,13 @@ class TranspositionTable:
 
         Returns:
             The matching record (a fresh instance when a mate score had to be
-            adjusted), or ``None`` when the key is absent.
+            adjusted), or ``None`` when the bucket is empty or holds a different
+            position (a key collision).
         """
-        entry = self._table.get(key)
-        if entry is None:
+        entry = self._buckets[key & self._mask]
+        # A bucket may hold a different position (collision); require an exact key
+        # match before trusting the record.
+        if entry is None or entry.key != key:
             return None
         adjusted = _score_from_tt(entry.score, ply)
         if adjusted == entry.score:
@@ -330,18 +372,20 @@ class TranspositionTable:
     def warm(self) -> None:
         """Reset the table to an empty, ready state.
 
-        Called once by the application lifespan at startup. It is cheap and
-        requires no board, so the first search pays no first-touch cost.
+        Called once by the application lifespan at startup. It re-touches the
+        fixed bucket array so the first search pays no first-touch cost.
         """
-        self._table = {}
+        self._buckets = [None] * self.num_buckets
+        self._count = 0
 
     def clear(self) -> None:
         """Empty the table, discarding every stored record."""
-        self._table.clear()
+        self._buckets = [None] * self.num_buckets
+        self._count = 0
 
     def __len__(self) -> int:
-        """Return the number of records currently stored."""
-        return len(self._table)
+        """Return the number of occupied buckets currently holding a record."""
+        return self._count
 
 
 class Searcher:
@@ -389,7 +433,12 @@ class Searcher:
         self._nodes: int = 0
         self._seldepth: int = 0
         self._deadline: float = 0.0
-        self._can_abort: bool = False
+        # Best fully-evaluated root move (and its score) seen during the current
+        # search. Tracked so that an abort during the very first
+        # iterative-deepening depth can still return a real, evaluated move
+        # instead of an arbitrary legal one. Reset at the start of each search.
+        self._root_best_move: chess.Move | None = None
+        self._root_best_score: int = 0
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -424,7 +473,8 @@ class Searcher:
         self._nodes = 0
         self._seldepth = 0
         self._deadline = start + max(0.0, limits.time_budget_s)
-        self._can_abort = False
+        self._root_best_move = None
+        self._root_best_score = 0
 
         legal_root = list(board.legal_moves)
         if not legal_root:
@@ -488,6 +538,12 @@ class Searcher:
         prev_score = 0
 
         for depth in range(1, max_depth + 1):
+            # Enforce the wall-clock budget before starting each depth,
+            # including the first. With no completed depth there is no full
+            # result to keep, so we stop here and fall back below to the best
+            # root move evaluated so far during the aborted iteration.
+            if time.monotonic() >= self._deadline:
+                break
             try:
                 move, score, scores = self._search_root_window(board, depth, prev_score)
             except _SearchAborted:
@@ -514,11 +570,19 @@ class Searcher:
                     )
                 )
 
-            self._can_abort = True
             if abs(score) >= MATE_THRESHOLD:
                 break
             if time.monotonic() >= self._deadline:
                 break
+
+        # If the very first depth was aborted before completing, fall back to
+        # the best root move that was fully evaluated during that aborted
+        # iteration (tracked in ``_root_best_move``) rather than to an arbitrary
+        # legal move. Later aborts keep the last completed depth's result.
+        if completed_depth == 0 and self._root_best_move is not None:
+            best_move = self._root_best_move
+            best_score = self._root_best_score
+            root_scores.setdefault(best_move, best_score)
 
         if best_move is None or best_move not in board.legal_moves:
             best_move = legal_root[0]
@@ -605,6 +669,10 @@ class Searcher:
             if score > best_score:
                 best_score = score
                 best_move = move
+                # Record the best fully-evaluated root move so an abort during
+                # the first iterative-deepening depth still yields a real move.
+                self._root_best_move = move
+                self._root_best_score = score
             if score > alpha:
                 alpha = score
             first = False
@@ -646,7 +714,7 @@ class Searcher:
         if ply > self._seldepth:
             self._seldepth = ply
 
-        if self._can_abort and (self._nodes & _TIME_CHECK_MASK) == 0:
+        if (self._nodes & _TIME_CHECK_MASK) == 0:
             if time.monotonic() >= self._deadline:
                 raise _SearchAborted
 
@@ -845,7 +913,7 @@ class Searcher:
         if ply > self._seldepth:
             self._seldepth = ply
 
-        if self._can_abort and (self._nodes & _TIME_CHECK_MASK) == 0:
+        if (self._nodes & _TIME_CHECK_MASK) == 0:
             if time.monotonic() >= self._deadline:
                 raise _SearchAborted
 

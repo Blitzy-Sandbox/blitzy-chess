@@ -5,15 +5,18 @@
 /* ------------------------------------------------------------------ *
  * Design tokens — the prompt's own values ARE the design system.
  * Mirrored as Tailwind utilities in tailwind.config.js
- * (board-light / board-dark / panel / max-w-board).
+ * (board-light / board-dark / panel / panel-inset / text-secondary /
+ * max-w-board).
  * ------------------------------------------------------------------ */
 /* prettier-ignore */
 :root {
   --board-light: #EED8B5;
   --board-dark: #AB7A53;
   --panel: #1e1e1e;
+  --panel-inset: #181818;
   --board-max: 640px;
   --text-primary: #e8e8e8;
+  --text-secondary: #9ca3af;
 }
 
 /* ------------------------------------------------------------------ *

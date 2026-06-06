@@ -14,18 +14,23 @@ The book is written to ``backend/books/opening_book.bin`` (the path the engine's
                 non-zero on any hard error so ``make`` surfaces the failure;
 * atomic      - bytes land in a temporary file and are renamed into place only
                 after a complete, non-empty download;
-* dependency-light - standard library only (``urllib``); the chess data format
-                itself is handled by the engine, not by this fetcher.
+* verified    - the source URL is pinned to an immutable release tag, and an
+                expected SHA-256 (``--sha256`` / ``OPENING_BOOK_SHA256``) is
+                checked before the file is installed; a custom ``--url`` must be
+                accompanied by a digest or an explicit ``--allow-unverified``;
+* dependency-light - standard library only (``urllib`` + ``hashlib``); the chess
+                data format itself is handled by the engine, not by this fetcher.
 
 Override the source or destination without editing this file::
 
     OPENING_BOOK_URL=<url> python backend/scripts/download_book.py
-    python backend/scripts/download_book.py --url <url> --output <path> --force
+    python backend/scripts/download_book.py --url <url> --sha256 <hex> --output <path> --force
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import socket
 import sys
@@ -34,11 +39,19 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-# Default source: a valid Polyglot book shipped in the python-chess repository.
-# Override via OPENING_BOOK_URL / --url to use a different or fuller book.
+# Default source: a valid Polyglot book shipped in the python-chess repository,
+# pinned to an IMMUTABLE release tag (not a moving branch) so the fetched artifact
+# is reproducible. Override via OPENING_BOOK_URL / --url to use a different book.
 DEFAULT_BOOK_URL = (
-    "https://github.com/niklasf/python-chess/raw/master/data/polyglot/performance.bin"
+    "https://github.com/niklasf/python-chess/raw/v1.11.2/data/polyglot/performance.bin"
 )
+# Expected SHA-256 of the default book. Left as None because the digest of the
+# pinned artifact has not been verified against the immutable source from inside
+# this build, and pinning an unverified hash would reject the legitimate file.
+# The immutable tag above is the reproducibility anchor; supply a digest via
+# --sha256 / OPENING_BOOK_SHA256 to enforce verification. The script prints the
+# computed digest on every download so a maintainer can record it here later.
+_DEFAULT_BOOK_SHA256: str | None = None
 USER_AGENT = "blitzy-chess-opening-book-fetch/1.0"
 DEFAULT_TIMEOUT_S = 30
 _POLYGLOT_ENTRY_BYTES = 16  # every Polyglot record is exactly 16 bytes
@@ -74,18 +87,34 @@ def _human_size(num_bytes: int) -> str:
     return f"{num_bytes} B"
 
 
-def download_file(url: str, dest: Path, *, timeout: int, quiet: bool) -> int:
-    """Download ``url`` to ``dest`` atomically. Return the byte count.
+def download_file(
+    url: str,
+    dest: Path,
+    *,
+    timeout: int,
+    quiet: bool,
+    expected_sha256: str | None = None,
+) -> int:
+    """Download ``url`` to ``dest`` atomically, verifying integrity. Return byte count.
+
+    The bytes stream to a temporary file while a SHA-256 digest is computed. When
+    ``expected_sha256`` is given, the digest MUST match before the file is moved
+    into place; a mismatch fails closed (the destination is left untouched). When
+    it is ``None`` the computed digest is reported (unless ``quiet``) so it can be
+    pinned. Directory and temp-file creation run inside the handled block, so
+    filesystem failures surface as an actionable ``RuntimeError`` -- never a raw
+    traceback -- and any partial temp file is cleaned up.
 
     Raises ``RuntimeError`` with an actionable message on any failure.
     """
-    dest.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".part", dir=dest.parent)
-    tmp_path = Path(tmp_name)
-    total = 0
+    tmp_path: Path | None = None
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=dest.name + ".", suffix=".part", dir=dest.parent)
+        tmp_path = Path(tmp_name)
+        digest = hashlib.sha256()
+        total = 0
         with urllib.request.urlopen(request, timeout=timeout) as response:
             with os.fdopen(tmp_fd, "wb") as tmp_file:
                 while True:
@@ -93,6 +122,7 @@ def download_file(url: str, dest: Path, *, timeout: int, quiet: bool) -> int:
                     if not chunk:
                         break
                     tmp_file.write(chunk)
+                    digest.update(chunk)
                     total += len(chunk)
         if total == 0:
             raise RuntimeError("the download produced an empty file")
@@ -102,6 +132,20 @@ def download_file(url: str, dest: Path, *, timeout: int, quiet: bool) -> int:
                 "this may not be a valid Polyglot book.",
                 file=sys.stderr,
             )
+        actual_sha256 = digest.hexdigest()
+        # Integrity gate: verify BEFORE the artifact is moved into place so a
+        # corrupt or tampered download can never replace the installed book.
+        if expected_sha256 is not None:
+            if actual_sha256.lower() != expected_sha256.strip().lower():
+                raise RuntimeError(
+                    f"checksum mismatch: expected SHA-256 {expected_sha256.strip().lower()} "
+                    f"but the downloaded data hashes to {actual_sha256}; the book was NOT "
+                    "installed. Verify the source or update the expected digest."
+                )
+            if not quiet:
+                print(f"  verified SHA-256 {actual_sha256}")
+        elif not quiet:
+            print(f"  computed SHA-256 {actual_sha256} (unverified; pass --sha256 to enforce)")
         os.replace(tmp_path, dest)
         return total
     except urllib.error.HTTPError as exc:
@@ -111,9 +155,9 @@ def download_file(url: str, dest: Path, *, timeout: int, quiet: bool) -> int:
     except (socket.timeout, TimeoutError) as exc:  # noqa: UP041
         raise RuntimeError(f"timed out after {timeout}s downloading {url}") from exc
     except OSError as exc:
-        raise RuntimeError(f"could not write {dest}: {exc}") from exc
+        raise RuntimeError(f"could not write to {dest.parent}: {exc}") from exc
     finally:
-        if tmp_path.exists():
+        if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
@@ -148,7 +192,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"network timeout in seconds (default: {DEFAULT_TIMEOUT_S}).",
     )
     parser.add_argument("--quiet", action="store_true", help="suppress progress output.")
+    parser.add_argument(
+        "--sha256",
+        default=None,
+        help="expected SHA-256 of the book, verified before install (env: OPENING_BOOK_SHA256).",
+    )
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="permit a custom --url with no --sha256 digest (bypasses the integrity check).",
+    )
     return parser.parse_args(argv)
+
+
+def resolve_expected_sha256(args: argparse.Namespace) -> str | None:
+    """Return the SHA-256 to verify against, or raise if a custom URL is unverified.
+
+    Precedence: an explicit ``--sha256`` / ``OPENING_BOOK_SHA256`` always wins.
+    Otherwise the default (immutably pinned) source uses ``_DEFAULT_BOOK_SHA256``
+    (which may be ``None`` -- "report but do not enforce"). A CUSTOM ``--url`` with
+    no digest is refused unless ``--allow-unverified`` is set, so an untrusted
+    source can never be installed silently.
+
+    Raises:
+        RuntimeError: If a custom URL is requested without a digest and without
+            an explicit ``--allow-unverified`` override.
+    """
+    explicit = args.sha256 or os.environ.get("OPENING_BOOK_SHA256")
+    if explicit:
+        return explicit.strip()
+    if args.url == DEFAULT_BOOK_URL:
+        return _DEFAULT_BOOK_SHA256
+    if not args.allow_unverified:
+        raise RuntimeError(
+            "refusing to download from a custom --url without integrity verification; "
+            "pass --sha256 <hexdigest> (or set OPENING_BOOK_SHA256), or --allow-unverified "
+            "to bypass this check explicitly."
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,8 +244,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         print(f"Downloading opening book\n  from {args.url}\n  to   {dest}")
+
     try:
-        size = download_file(args.url, dest, timeout=args.timeout, quiet=args.quiet)
+        expected_sha256 = resolve_expected_sha256(args)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        size = download_file(
+            args.url,
+            dest,
+            timeout=args.timeout,
+            quiet=args.quiet,
+            expected_sha256=expected_sha256,
+        )
     except RuntimeError as exc:
         print(f"error: failed to download the opening book: {exc}", file=sys.stderr)
         print(

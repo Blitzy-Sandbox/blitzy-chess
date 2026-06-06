@@ -17,11 +17,14 @@ Authority and validation:
 
 Concurrency:
     The state-mutation methods (``create_room``, ``join_room``, ``apply_move``,
-    ``reconnect``, ``resign``, ``forfeit``, ``get_room``, ``remove_room``) are
-    synchronous and need no event loop. Only the disconnect timer
-    (``mark_disconnected`` scheduling, ``_disconnect_timeout``, and
-    ``broadcast``) uses ``asyncio``. The timeout is injectable per manager
-    instance so tests run fast and deterministically.
+    ``reconnect``, ``resign``, ``get_room``, ``remove_room``) are synchronous and
+    need no event loop. Player-initiated resignation (``resign``) requires the
+    player's issued token; color-based forfeit is the internal ``_forfeit``
+    helper, driven only by the disconnect timer with a server-derived color, so a
+    client-controlled color string can never identify (and end the game for) a
+    player. Only the disconnect timer (``mark_disconnected`` scheduling,
+    ``_disconnect_timeout``, and ``broadcast``) uses ``asyncio``. The timeout is
+    injectable per manager instance so tests run fast and deterministically.
 
 Returned objects are the canonical ``chess_ai.rooms.protocol`` dataclasses so
 the transport only has to serialize them and the frontend types stay in step.
@@ -414,7 +417,7 @@ class RoomManager:
         Synchronous. Inside a running event loop it schedules an asyncio timer
         that forfeits the game if the player does not reconnect within the
         configured window; with no running loop it records the disconnect only
-        (tests then call :meth:`forfeit` directly).
+        (tests then call :meth:`_forfeit` directly).
         """
         room = self.get_room(code)
         if room is None:
@@ -445,7 +448,7 @@ class RoomManager:
         slot = room.slot_for_token(player_token)
         if slot is None or slot.connected or room.status != _STATUS_ACTIVE:
             return
-        game_over = self.forfeit(room.code, slot.color, reason="timeout")
+        game_over = self._forfeit(room.code, slot.color, reason="timeout")
         if game_over is not None:
             await self.broadcast(room, game_over)
 
@@ -488,13 +491,19 @@ class RoomManager:
     # Resignation and forfeit
     # ------------------------------------------------------------------
     def resign(
-        self, code: str, player_token_or_color: str
+        self, code: str, player_token: str
     ) -> protocol.GameOverMessage | protocol.ErrorMessage:
-        """Resign for the identified player.
+        """Resign the game for the player identified by ``player_token``.
 
-        ``player_token_or_color`` may be a player token (preferred) or a color
-        string. The opponent is recorded as the winner. Idempotent on a finished
-        room: the existing terminal ``GameOverMessage`` is returned.
+        Player-initiated resignation is token-authenticated: the caller must
+        present the opaque token issued on create/join (the same token that
+        authorizes a move). A raw color string is NOT accepted, so possession of
+        a room code alone can never resign on another player's behalf. The
+        opponent of the token's slot is recorded as the winner. Idempotent on a
+        finished room: the existing terminal ``GameOverMessage`` is returned.
+
+        Returns an ``ErrorMessage`` with ``NOT_YOUR_TURN`` when the token does
+        not match an occupied slot in the room.
         """
         room = self.get_room(code)
         if room is None:
@@ -510,30 +519,45 @@ class RoomManager:
                 code=protocol.ErrorCode.GAME_NOT_ACTIVE,
                 message="Game has already finished.",
             )
-        color = self._resolve_color(room, player_token_or_color)
-        if color is None:
+        slot = room.slot_for_token(player_token)
+        if slot is None:
             return protocol.ErrorMessage(
                 code=protocol.ErrorCode.NOT_YOUR_TURN,
-                message="Unknown player for this room.",
+                message="Unknown player token for this room.",
             )
-        logger.info("player resigned in %s: %s", room.code, color)
-        return self._finish(room, result="resignation", winner=opponent(color))
+        logger.info("player resigned in %s: %s", room.code, slot.color)
+        return self._finish(room, result="resignation", winner=opponent(slot.color))
 
-    def forfeit(
+    def _forfeit(
         self, code: str, loser_color: str, reason: str = "timeout"
     ) -> protocol.GameOverMessage | None:
-        """Finish the game against ``loser_color`` and return the result.
+        """Finish the game against ``loser_color`` (INTERNAL, color-based).
 
-        ``reason`` is also the terminal result string (default ``"timeout"``).
-        Synchronous and directly callable so tests need not wait for the real
-        timer. Idempotent: returns the existing terminal message if the room is
-        already finished, or ``None`` if the room is gone.
+        This is a private helper for SERVER-DRIVEN terminations only -- the
+        disconnect-timeout forfeit -- where ``loser_color`` is derived from an
+        authenticated slot, never from client input. It is deliberately not part
+        of the public API: a client-controlled color string must never identify a
+        player (that is the role of token-authenticated :meth:`resign`).
+
+        ``loser_color`` is validated against the room's occupied slots; an unknown
+        color or an empty seat returns ``None`` without mutating state. ``reason``
+        is also the terminal result string (default ``"timeout"``). Synchronous
+        and directly callable so tests need not wait for the real timer.
+        Idempotent: returns the existing terminal message if the room is already
+        finished, or ``None`` if the room is gone.
         """
         room = self.get_room(code)
         if room is None:
             return None
         if room.status == _STATUS_FINISHED:
             return self._terminal_game_over(room)
+        if loser_color not in (_COLOR_WHITE, _COLOR_BLACK) or room.slots.get(loser_color) is None:
+            logger.warning(
+                "ignoring forfeit in %s: %r is not an occupied player slot",
+                room.code,
+                loser_color,
+            )
+            return None
         logger.info("player forfeited in %s: %s (%s)", room.code, loser_color, reason)
         return self._finish(room, result=reason, winner=opponent(loser_color))
 
@@ -546,16 +570,6 @@ class RoomManager:
             winner=room.winner,
             reason=_result_reason(room.result, room.winner),
         )
-
-    @staticmethod
-    def _resolve_color(room: Room, token_or_color: str) -> str | None:
-        """Resolve a player token or a color string to a wire color, or None."""
-        slot = room.slot_for_token(token_or_color)
-        if slot is not None:
-            return slot.color
-        if token_or_color in (_COLOR_WHITE, _COLOR_BLACK):
-            return token_or_color
-        return None
 
     # ------------------------------------------------------------------
     # Notification (transport-agnostic)

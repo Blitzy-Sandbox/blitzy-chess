@@ -13,6 +13,10 @@ The load-bearing guarantees exercised here are:
 * ``parse_client_message`` round-trips inbound messages, accepts a JSON string or
   an already-decoded dict, ignores unknown keys, and raises :class:`ProtocolError`
   on malformed or unsupported input.
+* ``parse`` (the generic registry that also knows outbound types) round-trips
+  every server-to-client message -- ``RoomCreatedMessage``, ``RoomJoinedMessage``,
+  ``StateMessage`` (including a nested ``last_move``), ``AiThinkingMessage``,
+  ``GameOverMessage``, and ``ErrorMessage`` -- so ``parse(serialize(msg)) == msg``.
 * ``ErrorCode`` exposes the canonical closed set of error codes.
 
 The module is intentionally chess-free: a literal FEN string is used instead of
@@ -36,7 +40,9 @@ from chess_ai.rooms.protocol import (
     ReconnectMessage,
     ResignMessage,
     RoomCreatedMessage,
+    RoomJoinedMessage,
     StateMessage,
+    parse,
     parse_client_message,
     serialize,
 )
@@ -304,3 +310,170 @@ def test_error_codes_exist():
     assert expected <= values
     # Value-based lookup resolves to the corresponding member (StrEnum equality).
     assert ErrorCode("illegal_move") == ErrorCode.ILLEGAL_MOVE
+
+
+# ---------------------------------------------------------------------------
+# Outbound round-tripping: the generic ``parse`` registry (which also knows the
+# server-to-client types) reconstructs every outbound message from its own
+# ``serialize`` output. Because the dataclasses provide value equality and the
+# ``type`` discriminator is a fixed default, ``parse(serialize(msg)) == msg`` is
+# exact. These guard the frontend/backend wire contract against drift.
+# ---------------------------------------------------------------------------
+def test_parse_roundtrips_room_created():
+    """``parse(serialize(room_created))`` reconstructs an equal ``RoomCreatedMessage``."""
+    msg = RoomCreatedMessage(code="ABC123", color="white", player_token="tok-w")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, RoomCreatedMessage)
+    assert parsed.type == "room_created"
+    assert parsed.code == "ABC123"
+    assert parsed.color == "white"
+    assert parsed.player_token == "tok-w"
+    assert parsed == msg
+
+
+def test_parse_roundtrips_room_joined():
+    """``parse(serialize(room_joined))`` reconstructs an equal ``RoomJoinedMessage``."""
+    msg = RoomJoinedMessage(code="ABC123", color="black", player_token="tok-b")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, RoomJoinedMessage)
+    assert parsed.type == "room_joined"
+    assert parsed.code == "ABC123"
+    assert parsed.color == "black"
+    assert parsed.player_token == "tok-b"
+    assert parsed == msg
+
+
+def test_parse_roundtrips_state_with_last_move():
+    """A state snapshot round-trips, preserving the nested ``last_move`` square keys."""
+    msg = StateMessage(
+        fen=START_FEN,
+        move_history=["e4", "e5", "Nf3"],
+        turn="black",
+        status="active",
+        in_check=False,
+        last_move={"from_square": "g1", "to_square": "f3"},
+        winner=None,
+        result=None,
+    )
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, StateMessage)
+    assert parsed.type == "state"
+    assert parsed.move_history == ["e4", "e5", "Nf3"]
+    # The nested last_move survives the round trip with snake_case square keys.
+    assert parsed.last_move == {"from_square": "g1", "to_square": "f3"}
+    assert parsed == msg
+
+
+def test_parse_roundtrips_state_without_last_move():
+    """A state snapshot with no last move round-trips ``last_move=None``."""
+    msg = StateMessage(
+        fen=START_FEN,
+        move_history=[],
+        turn="white",
+        status="waiting",
+        in_check=False,
+    )
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, StateMessage)
+    assert parsed.last_move is None
+    assert parsed.winner is None
+    assert parsed.result is None
+    assert parsed == msg
+
+
+def test_parse_roundtrips_ai_thinking_full():
+    """An AI-thinking update round-trips with every optional field populated."""
+    msg = AiThinkingMessage(
+        depth=8,
+        evaluation=-42,
+        pv=["Nf3", "Nc6", "Bb5"],
+        nodes=987654,
+        time_s=1.25,
+        nps=790123,
+        mate_in=None,
+        seldepth=14,
+    )
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, AiThinkingMessage)
+    assert parsed.type == "ai_thinking"
+    assert parsed.pv == ["Nf3", "Nc6", "Bb5"]
+    assert parsed.time_s == 1.25
+    assert parsed.seldepth == 14
+    assert parsed == msg
+
+
+def test_parse_roundtrips_ai_thinking_defaults():
+    """An AI-thinking update round-trips with its optional fields left at ``None``."""
+    msg = AiThinkingMessage(depth=4, evaluation=10, pv=["e4"], nodes=500)
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, AiThinkingMessage)
+    assert parsed.time_s is None
+    assert parsed.nps is None
+    assert parsed.mate_in is None
+    assert parsed.seldepth is None
+    assert parsed == msg
+
+
+def test_parse_roundtrips_game_over_decisive():
+    """A decisive game-over round-trips its result, winner and reason."""
+    msg = GameOverMessage(result="checkmate", winner="black", reason="Black wins by checkmate")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, GameOverMessage)
+    assert parsed.type == "game_over"
+    assert parsed.result == "checkmate"
+    assert parsed.winner == "black"
+    assert parsed == msg
+
+
+def test_parse_roundtrips_game_over_draw():
+    """A drawn game-over round-trips ``winner=None`` through JSON ``null``."""
+    msg = GameOverMessage(result="draw", winner=None, reason="Draw by stalemate")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, GameOverMessage)
+    assert parsed.winner is None
+    assert parsed == msg
+
+
+def test_parse_roundtrips_error_illegal_move():
+    """An ``illegal_move`` error round-trips its code and message."""
+    msg = ErrorMessage(code="illegal_move", message="That move is not legal.")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, ErrorMessage)
+    assert parsed.type == "error"
+    assert parsed.code == "illegal_move"
+    assert parsed.code == ErrorCode.ILLEGAL_MOVE
+    assert parsed.message == "That move is not legal."
+    assert parsed == msg
+
+
+def test_parse_roundtrips_error_built_from_error_code_enum():
+    """An error built from an ``ErrorCode`` member round-trips to the plain string code."""
+    msg = ErrorMessage(code=ErrorCode.NOT_YOUR_TURN, message="Not your turn.")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, ErrorMessage)
+    assert parsed.code == "not_your_turn"
+    assert parsed.code == ErrorCode.NOT_YOUR_TURN
+    # StrEnum compares equal to its value, so the round trip is still exact.
+    assert parsed == msg
+
+
+def test_parse_generic_registry_also_handles_inbound():
+    """The generic ``parse`` accepts inbound types too (the merged registry)."""
+    # Unlike ``parse_client_message`` (inbound-only), ``parse`` covers every type;
+    # a ``move`` therefore round-trips through it as well.
+    msg = MoveMessage(from_square="e7", to_square="e8", promotion="q")
+    parsed = parse(serialize(msg))
+
+    assert isinstance(parsed, MoveMessage)
+    assert parsed.promotion == "q"
+    assert parsed == msg
