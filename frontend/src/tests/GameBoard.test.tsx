@@ -85,4 +85,25 @@ describe('GameBoard (renders only via react-chessboard — C15)', () => {
     render(<GameBoard fen={START_FEN} orientation="white" onMove={() => true} draggable={false} />);
     expect(lastProps().arePiecesDraggable).toBe(false);
   });
+
+  it('suppresses the react-chessboard built-in promotion picker so all promotions use the app dialog', () => {
+    // INFO-1 regression guard: GameBoard must pin react-chessboard's
+    // `onPromotionCheck` to always return false. Otherwise the library's default
+    // pops its OWN promotion picker on a drag-to-last-rank (bypassing
+    // `onPieceDrop`), giving a DIFFERENT promotion UI than the click path. With
+    // it forced false, a promoting drag flows through `onPieceDrop` -> `onMove`
+    // and the parent shows the single app-owned PromotionDialog for BOTH input
+    // methods.
+    render(<GameBoard fen={START_FEN} orientation="white" onMove={() => true} />);
+    const onPromotionCheck = lastProps().onPromotionCheck as
+      | ((source: string, target: string, piece: string) => boolean)
+      | undefined;
+    // The prop must be provided (not left to the library default).
+    expect(typeof onPromotionCheck).toBe('function');
+    // The canonical promotion drag (white pawn e7 -> e8) must NOT be claimed by
+    // react-chessboard, regardless of square/piece — it always returns false.
+    expect(onPromotionCheck!('e7', 'e8', 'wP')).toBe(false);
+    expect(onPromotionCheck!('b2', 'b1', 'bP')).toBe(false);
+    expect(onPromotionCheck!('a7', 'b8', 'wP')).toBe(false);
+  });
 });

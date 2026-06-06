@@ -21,9 +21,16 @@
  *
  * Interaction model. Both input styles work: drag-and-drop (react-chessboard's
  * `onPieceDrop`) and click-to-move (`onSquareClick`, where the parent tracks the
- * first/second click). The board flips on demand via `orientation`, caps its
- * width at the design's 640px, and paints three highlight layers through
- * react-chessboard's `customSquareStyles`:
+ * first/second click). Crucially, BOTH input styles route a pawn promotion
+ * through the SAME app-owned `PromotionDialog`: `onPromotionCheck` is pinned to
+ * always return `false` so react-chessboard never opens its OWN built-in
+ * promotion picker on a drag-to-last-rank. With the library's picker suppressed,
+ * a promoting drag falls through to `onPieceDrop` -> `onMove` exactly like every
+ * other move, and the parent (`../App.tsx`) detects the promotion and shows its
+ * custom dialog — identical to the click path. Without this pin the two input
+ * methods would surface two different promotion UIs. The board flips on demand
+ * via `orientation`, caps its width at the design's 640px, and paints three
+ * highlight layers through react-chessboard's `customSquareStyles`:
  *   - the last move (both source and destination squares),
  *   - the legal-move targets (a lichess-style dot drawn as a radial gradient),
  *   - the king square when in check (a translucent red wash).
@@ -184,6 +191,17 @@ export function GameBoard({
         boardWidth={width}
         arePiecesDraggable={draggable ?? true}
         onPieceDrop={(source, target) => onMove(source, target)}
+        // Always defer promotion handling to the app's custom PromotionDialog by
+        // suppressing react-chessboard's OWN built-in promotion picker. The
+        // library's default `onPromotionCheck` returns `true` whenever a pawn is
+        // dragged to the last rank, which would pop its built-in dialog and
+        // bypass `onPieceDrop` entirely — so a DRAGGED promotion would use a
+        // different UI than a CLICKED one (which routes through `onSquareClick`
+        // -> the app dialog). Returning `false` here keeps the library from ever
+        // showing its picker, so a promoting drag flows through `onPieceDrop` ->
+        // `onMove` like any other move and the parent opens the single app-owned
+        // PromotionDialog. Both input methods therefore share one promotion UI.
+        onPromotionCheck={() => false}
         onSquareClick={onSquareClick ? (square) => onSquareClick(square) : undefined}
         customLightSquareStyle={{ backgroundColor: 'var(--board-light)' }}
         customDarkSquareStyle={{ backgroundColor: 'var(--board-dark)' }}
