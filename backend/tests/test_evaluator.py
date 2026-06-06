@@ -15,15 +15,11 @@ single most common evaluator-test mistake:
   **White's** point of view: positive favors White regardless of whose turn it
   is.
 
-What is asserted (and, deliberately, what is not):
-
-* The assertions check *signs*, *ranges*, *monotonic relationships*, *mirror
-  symmetry*, and *cache invariances* -- properties that are robust to the engine
-  author re-tuning the piece-square tables. Exact piece-square-derived
-  centipawn magnitudes are intentionally NOT asserted, because they are brittle.
-* Material magnitudes are cross-checked against the engine's own
-  :data:`chess_ai.engine.tables.PIECE_VALUES` rather than hard-coded numbers, so
-  the tests track the engine's data instead of duplicating it.
+What is asserted: signs, ranges, monotonic relationships, mirror symmetry, and
+cache invariances; material magnitudes are cross-checked against the engine's own
+:data:`chess_ai.engine.tables.PIECE_VALUES`. Exact piece-square-derived centipawn
+magnitudes are not asserted. The rationale (robust property assertions over brittle
+exact magnitudes) is recorded in docs/decision-log.md.
 
 Coverage maps to the evaluator's contract and to AAP constraints 4 and 5:
 

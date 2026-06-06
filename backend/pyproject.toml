@@ -90,9 +90,15 @@ addopts = "-ra -q"
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-# Keep test output focused; third-party DeprecationWarnings are not actionable
-# within this scope.
-filterwarnings = ["ignore::DeprecationWarning"]
+# Keep test output focused. The second entry silences the pinned Starlette's
+# TestClient notice (it suggests an `httpx2` package that is not generally
+# available); the WebSocket suites keep using the supported TestClient. This
+# warning subclasses UserWarning, so the DeprecationWarning filter does not
+# cover it. Rationale and the deviation are recorded in docs/decision-log.md.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
 
 # ----------------------------------------------------------------------------
 # coverage (informational only; pytest-cov is a dev dependency)

@@ -26,24 +26,16 @@
  * fixes the file list); only {@link App} is exported, which also keeps the file
  * fast-refresh friendly (`react-refresh/only-export-components`).
  *
- * Load-bearing constraints upheld by the screens composed here:
- *   - C1 (server authoritative): every rendered position is the server's
- *     {@link StateMessage}.fen. The {@link useGameState} chess.js mirror is
- *     display/SAN/highlight only and is synced one-way FROM that FEN — it never
- *     decides legality.
- *   - C15 (board only via react-chessboard): the board is drawn exclusively by
- *     {@link GameBoard}; App renders no board of its own.
- *   - C16 (WebSocket only for moves): user moves flow solely through the hooks'
- *     `sendMove`; App issues no HTTP/REST for game actions.
- *
- * The project uses the JSX automatic runtime, so React is not imported as a
- * namespace; only the named hooks are. The rationale for design choices lives in
- * docs/decision-log.md, per the Explainability rule, not in these comments.
+ * Constraint coverage (C1 server-authoritative, C15 board via react-chessboard,
+ * C16 WebSocket-only moves) and the rationale for these composition choices are
+ * documented in docs/decision-log.md and docs/traceability-matrix.md.
  *
  * @module App
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Chess } from 'chess.js';
 
+import type { CapturedMove } from './components/CapturedPieces';
 import { GameBoard } from './components/GameBoard';
 import { GameOverOverlay } from './components/GameOverOverlay';
 import { ModeSelect } from './components/ModeSelect';
@@ -88,6 +80,32 @@ function toBoardLastMove(state: StateMessage | null): { from: string; to: string
     return null;
   }
   return { from: state.last_move.from_square, to: state.last_move.to_square };
+}
+
+/**
+ * Derive the capture history from the server's authoritative SAN move list by
+ * replaying it through a throwaway chess.js instance. Each replayed move reports
+ * the side that moved and the piece it captured (if any) — exactly the
+ * {@link CapturedMove} shape {@link SidePanel} forwards to its captured-pieces
+ * summary. Captures come from server-approved moves, never from the FEN (which is
+ * unsound across promotions). The replay is defensive: a move it cannot parse
+ * stops the walk rather than throwing during render.
+ *
+ * @param moveHistory - The authoritative SAN move list (`state.move_history`).
+ * @returns The capture-relevant move records, in play order.
+ */
+function capturedMovesFromHistory(moveHistory: readonly string[]): CapturedMove[] {
+  const replay = new Chess();
+  const captures: CapturedMove[] = [];
+  for (const san of moveHistory) {
+    try {
+      const move = replay.move(san);
+      captures.push({ color: move.color, captured: move.captured });
+    } catch {
+      break;
+    }
+  }
+  return captures;
 }
 
 /**
@@ -239,6 +257,13 @@ function AiGameScreen({
   const aiThinking: AiThinkingMessage | null = ws.aiThinking;
   const gameOver: GameOverMessage | null = ws.gameOver;
 
+  // Captured pieces + material differential, derived from the authoritative SAN
+  // history and memoized so the replay only runs when the move list changes.
+  const capturedMoves = useMemo(
+    () => capturedMovesFromHistory(state?.move_history ?? []),
+    [state?.move_history],
+  );
+
   const boardWidth = useBoardWidth();
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<{ from: string; to: string } | null>(null);
@@ -338,6 +363,7 @@ function AiGameScreen({
         status={deriveStatus(state, connected, humanColor, 'AI')}
         turn={state?.turn ?? humanColor}
         moveHistory={state?.move_history ?? []}
+        capturedMoves={capturedMoves}
         aiThinking={aiThinking}
         fen={state?.fen ?? 'start'}
         onResign={resign}
@@ -382,6 +408,14 @@ function OnlineScreen({ onExit }: { onExit: () => void }) {
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [promotion, setPromotion] = useState<{ from: string; to: string } | null>(null);
   const [flipped, setFlipped] = useState(false);
+
+  // Captured pieces + material differential, derived from the authoritative SAN
+  // history and memoized. Declared here (above the lobby early return) so the
+  // hook runs unconditionally on every render, satisfying the Rules of Hooks.
+  const capturedMoves = useMemo(
+    () => capturedMovesFromHistory(state?.move_history ?? []),
+    [state?.move_history],
+  );
 
   // C1: sync the display-only mirror from the authoritative server FEN.
   useEffect(() => {
@@ -485,6 +519,7 @@ function OnlineScreen({ onExit }: { onExit: () => void }) {
         status={deriveStatus(state, connected, myColor, 'Opponent')}
         turn={state.turn}
         moveHistory={state.move_history}
+        capturedMoves={capturedMoves}
         fen={state.fen}
         onResign={resign}
         onFlip={handleFlip}

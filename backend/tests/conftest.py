@@ -1,18 +1,15 @@
 """Shared pytest fixtures and helpers for the ``chess_ai`` backend test suite.
 
-This module is the single source of test-support primitives every other suite in
-``backend/tests/`` builds on. It is deliberately small and dependency-light so the
-fixtures stay fast and robust:
+Every other suite in ``backend/tests/`` builds on these primitives:
 
 * ``START_FEN`` -- the canonical starting-position FEN (``chess.STARTING_FEN``),
   re-exported so suites can assert against a stable reference without importing
   ``chess`` themselves.
 * ``make_board`` -- a factory fixture that builds ``chess.Board`` instances from an
-  optional FEN, keeping board construction terse and uniform across suites.
-* ``client`` -- a *session-scoped* synchronous ``fastapi.testclient.TestClient`` entered
-  as a context manager so the FastAPI lifespan (which wires OpenTelemetry instrumentation
-  and Prometheus collectors) runs exactly once for the whole session. It drives BOTH the
-  WebSocket endpoints (``/ws/game``, ``/ws/multiplayer``) and the REST surface.
+  optional FEN.
+* ``client`` -- a session-scoped synchronous ``fastapi.testclient.TestClient`` entered as a
+  context manager so the application lifespan is active. Use it for BOTH the WebSocket
+  endpoints (``/ws/game``, ``/ws/multiplayer``) and the REST surface.
 * ``async_client`` -- a function-scoped ``httpx.AsyncClient`` bound to the app through
   ``httpx.ASGITransport``, for REST/health checks ONLY. ASGITransport cannot open a
   WebSocket scope, so it must never be pointed at ``/ws/...``.
@@ -20,19 +17,11 @@ fixtures stay fast and robust:
   JSON frames off a WebSocket until one of the wanted ``type`` arrives, skipping the
   interleaved ``ai_thinking`` updates the AI endpoint streams before its terminal frame.
 
-Design notes
-------------
-* The synchronous ``TestClient`` is mandatory for WebSocket tests; ``httpx`` cannot open
-  the WebSocket scope. The two clients therefore serve different transports on purpose.
-* ``client`` is session-scoped (not function-scoped) so the app lifespan runs a single
-  time. Re-entering the lifespan per test would re-register the OpenTelemetry FastAPI
-  instrumentation and the Prometheus collectors, raising duplicate-registration errors.
-  Per-test isolation of the module-level multiplayer ``RoomManager`` singleton is handled
-  by an autouse cleanup fixture in ``test_multiplayer_ws.py``, not by this client's scope.
-
 Tests run from ``backend/`` (pytest's rootdir, where ``pyproject.toml`` sets
 ``testpaths = ["tests"]`` and ``asyncio_mode = "auto"``). That directory is auto-prepended
-to ``sys.path``, so ``import chess_ai...`` resolves with no path manipulation here.
+to ``sys.path``, so ``import chess_ai...`` resolves with no path manipulation here. The
+rationale for the session-scoped client and the two-transport split is recorded in
+docs/decision-log.md.
 """
 
 import chess
@@ -73,17 +62,14 @@ def make_board():
 def client():
     """Yield a synchronous FastAPI ``TestClient`` with the application lifespan active.
 
-    Session-scoped on purpose: entering ``TestClient(app)`` as a context manager runs the
-    app's startup/shutdown lifespan, which configures OpenTelemetry FastAPI instrumentation
-    and the Prometheus collectors. Running that once per session avoids duplicate-registration
-    errors (such as "Duplicated timeseries" / "already instrumented") that a function-scoped
-    client would trigger by re-entering the lifespan on every test.
-
     Use this client for BOTH transports:
 
     * WebSocket tests -- ``with client.websocket_connect("/ws/game") as ws: ...`` (the sync
       client is required; ``httpx`` cannot open a WebSocket scope).
     * REST smoke tests -- ``client.get("/health")`` and friends.
+
+    The fixture is session-scoped; the rationale (running the app lifespan exactly once) is
+    recorded in docs/decision-log.md.
 
     Yields:
         A live ``fastapi.testclient.TestClient`` bound to the application.

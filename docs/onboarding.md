@@ -79,7 +79,7 @@ Every operation runs through `make`. You never type a raw build, test, or run co
 | `make clean` | Remove the virtual environment, node modules, build output, caches, and game recordings. |
 | `make all` | Convenience aggregate: set up, build, and test everything. |
 
-Under the hood, `make lint` and `make format` wrap the real tools — ruff for Python, eslint and prettier for TypeScript — but you invoke only the make target. The backend tests run under pytest and the frontend tests run under Vitest, again behind `make test`. One extra target exists for the opening book: `make download-book` fetches it on its own, and `make init` already runs it for you, so you rarely call it directly.
+Under the hood, `make lint` and `make format` wrap the real tools — ruff for Python, eslint and prettier for TypeScript — but you invoke only the make target. The backend tests run under pytest and the frontend tests run under Vitest, again behind `make test`. The Polyglot opening book is downloaded as part of `make init`, so you do not fetch it separately.
 
 ## Difficulty tiers
 

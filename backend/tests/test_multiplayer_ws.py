@@ -14,7 +14,8 @@ that move.
 
 Two design points keep the suite fast and reliable:
 
-* Every WebSocket read goes through the bounded ``recv_until`` helper, so a
+* WebSocket reads are bounded -- through the ``recv_until`` helper, or (for the
+  opponent-no-frame case) a background read with an explicit timeout -- so a
   missing or mistyped broadcast fails as a quick assertion instead of blocking
   the test forever.
 * The endpoint backs every connection with one module-level ``RoomManager``
@@ -23,6 +24,7 @@ Two design points keep the suite fast and reliable:
   (and any disconnect timers) of one test never leak into the next.
 """
 
+import concurrent.futures
 import contextlib
 import re
 
@@ -172,23 +174,44 @@ def test_illegal_move_rejected_and_not_relayed(client, recv_until):
     """Constraint 12: an illegal move errors to the mover only and is never relayed.
 
     The illegal move is sent FIRST, while it is still White's turn, so the
-    server's legality check (not the turn check) is what rejects it. A
-    subsequent legal move proves the opponent's stream skipped the illegal one.
+    server's legality check (not the turn check) is what rejects it. A single
+    background read on Black's socket proves the opponent receives NOTHING for the
+    rejected move: that read stays pending across the rejection, then resolves
+    with the authoritative state only after a later legal move. Reusing one future
+    (rather than two sequential reads) avoids frame-stealing -- whatever frame
+    Black receives FIRST is exactly the frame asserted below.
     """
     with _two_player_game(client, recv_until) as (white, black, _, _, _):
-        # e2->e5 is illegal from the start; the offender alone gets an error.
-        white.send_json({"type": "move", "from_square": "e2", "to_square": "e5"})
-        error = white.receive_json()
-        assert error["type"] == "error"
-        assert error["code"] == "illegal_move"
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            # One background read; Black's first frame will resolve this future.
+            black_next = pool.submit(black.receive_json)
 
-        # Now play a legal move. Black's very next state must reflect e4 with a
-        # single-move history -- proving the illegal e5 produced no broadcast and
-        # never touched the authoritative position.
-        white.send_json({"type": "move", "from_square": "e2", "to_square": "e4"})
-        black_state = recv_until(black, "state")
-        assert black_state["fen"] == _AFTER_E4_FEN
-        assert black_state["move_history"] == ["e4"]
+            # e2->e5 is illegal from the start; the offender alone gets an error.
+            white.send_json({"type": "move", "from_square": "e2", "to_square": "e5"})
+            error = white.receive_json()
+            assert error["type"] == "error"
+            assert error["code"] == "illegal_move"
+
+            # White's error has arrived, so the server finished handling the
+            # illegal move; any (erroneous) opponent broadcast would already be
+            # enqueued. Black's read must still be pending -- the opponent got
+            # nothing for the rejected move.
+            with pytest.raises(concurrent.futures.TimeoutError):
+                black_next.result(timeout=0.5)
+
+            # Now play a legal move. Black's FIRST frame (the still-pending read)
+            # must be the authoritative state for e4 -- never a leaked error.
+            white.send_json({"type": "move", "from_square": "e2", "to_square": "e4"})
+            black_state = black_next.result(timeout=5.0)
+            assert black_state["type"] == "state"
+            assert black_state["fen"] == _AFTER_E4_FEN
+            assert black_state["move_history"] == ["e4"]
+        finally:
+            # Non-blocking shutdown: if an assertion failed with the read still
+            # pending, closing the socket (on context exit) unblocks the worker,
+            # so the test fails fast instead of hanging on pool join.
+            pool.shutdown(wait=False)
 
 
 def test_move_out_of_turn_rejected(client, recv_until):

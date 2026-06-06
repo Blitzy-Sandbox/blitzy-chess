@@ -213,10 +213,14 @@ def test_search_returns_legal_move(make_board) -> None:
 
 
 def test_search_pv_starts_with_best_move() -> None:
-    """When a principal variation is present, it begins with the chosen move."""
+    """A non-terminal search yields a non-empty PV that begins with the best move.
+
+    The start position is non-terminal, so a depth-4 search must return a
+    principal variation; an empty PV is a regression, not an allowed outcome.
+    """
     result = best(START_FEN, depth=4)
-    if result.pv:
-        assert result.pv[0] == result.best_move
+    assert result.pv, "non-terminal search must return a non-empty principal variation"
+    assert result.pv[0] == result.best_move
 
 
 def test_search_from_tier_easy(make_board) -> None:

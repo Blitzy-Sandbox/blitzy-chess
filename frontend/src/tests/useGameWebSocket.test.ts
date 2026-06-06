@@ -69,6 +69,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 function mountOpen(opts: Parameters<typeof useGameWebSocket>[0]) {
@@ -199,6 +200,37 @@ describe('useGameWebSocket', () => {
     expect(MockWebSocket.instances.length).toBe(2);
     expect(first.readyState).toBe(MockWebSocket.CLOSED);
     expect(result.current.state).toBeNull();
+  });
+
+  it('reconnects after an unexpected close to the same /ws/game URL', () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() =>
+      useGameWebSocket({ difficulty: 'medium', humanColor: 'white' }),
+    );
+    const first = lastInstance();
+    act(() => first.triggerOpen());
+    expect(result.current.connected).toBe(true);
+
+    // Simulate a server-side drop: the hook marks the connection down and
+    // schedules a backoff reconnect timer.
+    act(() => first.triggerClose());
+    expect(result.current.connected).toBe(false);
+
+    // Advancing the pending timer fires the reconnect, which opens a fresh
+    // socket to the SAME /ws/game endpoint carrying difficulty and color.
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    const second = lastInstance();
+    expect(second).not.toBe(first);
+    expect(second.url).toContain('/ws/game');
+    expect(second.url).toContain('difficulty=medium');
+    expect(second.url).toContain('color=white');
+
+    // The hook stays disconnected until the new socket actually opens.
+    expect(result.current.connected).toBe(false);
+    act(() => second.triggerOpen());
+    expect(result.current.connected).toBe(true);
   });
 
   it('never uses fetch/REST for game moves (C16)', () => {

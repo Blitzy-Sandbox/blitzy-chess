@@ -14,17 +14,12 @@ This suite covers two layers of the self-play demonstration:
   the >=5s/move pacing, the per-ply browser render hook, the move-limit cutoff,
   and the start -> record -> play -> transcript -> shutdown lifecycle.
 
-Speed and isolation
--------------------
-The suite MUST run headless and fast. Playwright, the browser, the screen
-recording, and the FastAPI server are never started: the orchestration test
-injects ``AsyncMock`` server and recorder seams and short-circuits the game.
-The game-loop tests inject scripted searchers, a recording no-op ``sleep`` (so
-the pacing never actually blocks), and a fast ``search`` adapter that skips the
-real worker-thread offload. The module imports cleanly with NO Playwright
-installed because the runner imports Playwright lazily, inside
-``BrowserRecorder.start`` -- this file therefore never imports Playwright at the
-top level.
+Test seams: the orchestration test injects ``AsyncMock`` server and recorder
+seams; the game-loop tests inject scripted searchers, a no-op ``sleep``, and a
+fast ``search`` adapter. Playwright, the browser, recording, and the server are
+never launched, and the module imports without Playwright installed (the runner
+imports it lazily inside ``BrowserRecorder.start``). The rationale for this
+headless, mocked strategy is recorded in docs/decision-log.md.
 
 The chess facts used below are verified and fixed: the Fool's-mate line
 ``1. f3 e5 2. g4 Qh4#`` ends in four plies with Black delivering checkmate, and

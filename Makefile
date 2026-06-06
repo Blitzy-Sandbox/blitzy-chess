@@ -48,12 +48,23 @@ PLAYWRIGHT   := $(VENV_BIN)/playwright
 # Fallback source for pip when `python -m venv` cannot provision it itself.
 GET_PIP_URL  := https://bootstrap.pypa.io/get-pip.py
 
+# --- Canned recipe: provision the backend virtualenv -----------------------
+# An IMPLEMENTATION VARIABLE (not a make target) so the backend venv bootstrap
+# is shared by the public `init` and `download-syzygy` targets without adding a
+# `venv` target to the public surface. Idempotent and resilient to a broken
+# platform `ensurepip`: it creates the venv (falling back to `--without-pip`),
+# then bootstraps pip via `ensurepip` or, failing that, get-pip.py. Each line is
+# a single logical shell statement so the canned recipe expands cleanly.
+define ensure_venv
+@test -x $(PY) || { echo "==> Creating virtualenv at $(VENV)"; $(PYTHON) -m venv $(VENV) || $(PYTHON) -m venv --without-pip $(VENV); }
+@test -x $(PIP) || $(PY) -m ensurepip --upgrade >/dev/null 2>&1 || { echo "==> ensurepip unavailable; bootstrapping pip via get-pip.py"; curl -fsSL $(GET_PIP_URL) -o /tmp/get-pip.py && $(PY) /tmp/get-pip.py; }
+@$(PY) -m pip install --upgrade pip setuptools wheel
+endef
+
 .DEFAULT_GOAL := help
 
-.PHONY: help init init-backend init-frontend venv dev dev-backend dev-frontend \
-	build start self-play test test-backend test-frontend lint lint-backend \
-	lint-frontend format format-backend format-frontend download-book \
-	download-syzygy clean all
+.PHONY: help init dev build start self-play test test-backend test-frontend \
+	lint format download-syzygy clean all
 
 # ============================================================================
 #  Help
@@ -72,28 +83,12 @@ help: ## Show this help — every target with a one-line description
 # ============================================================================
 
 init: ## One-time setup from a clean machine: venv, backend+dev deps, Playwright, frontend deps, opening book
-	@$(MAKE) --no-print-directory venv
-	@$(MAKE) --no-print-directory init-backend
-	@$(MAKE) --no-print-directory init-frontend
-	@$(MAKE) --no-print-directory download-book
-	@echo "==> Setup complete. Next: 'make dev' (development) or 'make start' (production-style)."
-
-venv: ## Create the backend virtualenv at backend/.venv (idempotent; bootstraps pip if ensurepip is broken)
-	@test -x $(PY) || { \
-		echo "==> Creating virtualenv at $(VENV)"; \
-		$(PYTHON) -m venv $(VENV) || $(PYTHON) -m venv --without-pip $(VENV); \
-		$(PY) -m ensurepip --upgrade >/dev/null 2>&1 || \
-			{ echo "==> ensurepip unavailable; bootstrapping pip via get-pip.py"; \
-			  curl -fsSL $(GET_PIP_URL) -o /tmp/get-pip.py && $(PY) /tmp/get-pip.py; }; \
-	}
-	@$(PY) -m pip install --upgrade pip setuptools wheel
-
-init-backend: venv ## Install backend runtime + dev dependencies and the Playwright browser
+	$(ensure_venv)
 	$(PIP) install -r $(BACKEND_DIR)/requirements.txt -r $(BACKEND_DIR)/requirements-dev.txt
 	$(PLAYWRIGHT) install chromium
-
-init-frontend: ## Install the frontend npm dependencies
 	cd $(FRONTEND_DIR) && npm install
+	$(PY) $(BACKEND_DIR)/scripts/download_book.py
+	@echo "==> Setup complete. Next: 'make dev' (development) or 'make start' (production-style)."
 
 # ============================================================================
 #  Development & run
@@ -107,12 +102,6 @@ dev: ## Run the backend (:8000) and the Vite dev server together; Ctrl-C stops b
 		( cd $(BACKEND_DIR) && exec $(UVICORN) chess_ai.app:app --reload --port $(PORT) ) & \
 		( cd $(FRONTEND_DIR) && exec npm run dev ) & \
 		wait
-
-dev-backend: ## Run only the FastAPI backend with auto-reload (Uvicorn on :8000)
-	cd $(BACKEND_DIR) && $(UVICORN) chess_ai.app:app --reload --port $(PORT)
-
-dev-frontend: ## Run only the Vite dev server
-	cd $(FRONTEND_DIR) && npm run dev
 
 build: ## Build the production frontend bundle into frontend/dist
 	cd $(FRONTEND_DIR) && npm run build
@@ -135,30 +124,20 @@ test-backend: ## Run the backend test suite (pytest; config in backend/pyproject
 test-frontend: ## Run the frontend test suite (Vitest, single run)
 	cd $(FRONTEND_DIR) && npm run test
 
-lint: lint-backend lint-frontend ## Lint the backend (ruff) and the frontend (eslint)
-
-lint-backend: ## Lint the backend with ruff
+lint: ## Lint the backend (ruff) and the frontend (eslint)
 	cd $(BACKEND_DIR) && $(RUFF) check .
-
-lint-frontend: ## Lint the frontend with eslint
 	cd $(FRONTEND_DIR) && npm run lint
 
-format: format-backend format-frontend ## Format the backend (ruff) and the frontend (prettier)
-
-format-backend: ## Format the backend with ruff
+format: ## Format the backend (ruff) and the frontend (prettier)
 	cd $(BACKEND_DIR) && $(RUFF) format .
-
-format-frontend: ## Format the frontend with prettier
 	cd $(FRONTEND_DIR) && npm run format
 
 # ============================================================================
 #  Data assets
 # ============================================================================
 
-download-book: venv ## Download the Polyglot opening book into backend/books/
-	$(PY) $(BACKEND_DIR)/scripts/download_book.py
-
-download-syzygy: venv ## Download the Syzygy endgame tablebases into backend/tables/
+download-syzygy: ## Download the Syzygy endgame tablebases into backend/tables/
+	$(ensure_venv)
 	$(PY) $(BACKEND_DIR)/scripts/download_syzygy.py
 
 # ============================================================================
