@@ -28,9 +28,11 @@
  *   - the legal-move targets (a lichess-style dot drawn as a radial gradient),
  *   - the king square when in check (a translucent red wash).
  *
- * Styling. The board palette is the lichess style — light squares `#EED8B5`,
- * dark squares `#AB7A53` — passed inline because react-chessboard's square-style
- * props accept style objects, not class names. The highlight values mirror the
+ * Styling. The board palette is the lichess style, applied through the shared
+ * `--board-light` / `--board-dark` CSS variable tokens (defined in
+ * `../styles/index.css`, mirrored by Tailwind's `board-light` / `board-dark`)
+ * rather than duplicated hex literals — passed inline because react-chessboard's
+ * square-style props accept style objects, not class names. The highlight values mirror the
  * `.square-*` helpers in `../styles/index.css`; they are inlined here because
  * react-chessboard styles individual squares through `customSquareStyles`
  * (`CSSProperties` objects), not via class names. The width cap uses the
@@ -183,8 +185,8 @@ export function GameBoard({
         arePiecesDraggable={draggable ?? true}
         onPieceDrop={(source, target) => onMove(source, target)}
         onSquareClick={onSquareClick ? (square) => onSquareClick(square) : undefined}
-        customLightSquareStyle={{ backgroundColor: '#EED8B5' }}
-        customDarkSquareStyle={{ backgroundColor: '#AB7A53' }}
+        customLightSquareStyle={{ backgroundColor: 'var(--board-light)' }}
+        customDarkSquareStyle={{ backgroundColor: 'var(--board-dark)' }}
         customSquareStyles={customSquareStyles}
         customBoardStyle={{ borderRadius: '4px' }}
       />

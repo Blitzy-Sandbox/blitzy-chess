@@ -213,12 +213,24 @@ export function useGameWebSocket(params: UseGameWebSocketParams): UseGameWebSock
       switch (message.type) {
         case 'state':
           setState(message);
+          // The authoritative position has arrived. In the AI flow the engine's
+          // `ai_thinking` updates stream only BETWEEN the human-applied `state`
+          // and the AI-applied `state`, so clearing here returns `aiThinking` to
+          // `null` once the search that produced this position is complete. The
+          // SidePanel "AI thinking…" block is gated on a truthy `aiThinking`, so
+          // this guarantees it shows only while a search is actually streaming
+          // and never lingers after the AI move lands.
+          setAiThinking(null);
           break;
         case 'ai_thinking':
           setAiThinking(message);
           break;
         case 'game_over':
           setGameOver(message);
+          // The game has ended and the engine is idle; clear any lingering
+          // search progress so the thinking indicator never persists past the
+          // result.
+          setAiThinking(null);
           break;
         case 'error':
           setError(message);

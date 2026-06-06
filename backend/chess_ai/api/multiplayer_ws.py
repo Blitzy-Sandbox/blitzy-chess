@@ -128,13 +128,13 @@ async def multiplayer_endpoint(websocket: WebSocket) -> None:
         await websocket.send_json(payload)
 
     try:
-        # Count the connection (and, for a simple, balanced gauge, the game) for
-        # the whole session. Both context managers decrement on exit, including
-        # when the body raises, so the gauges never leak.
-        with (
-            metrics.track_ws_connection(_ENDPOINT),
-            metrics.track_active_game(_ENDPOINT),
-        ):
+        # Count this open WebSocket connection for the whole session; the gauge
+        # decrements on exit (including when the body raises) so it never leaks.
+        # Active multiplayer GAMES are tracked separately by the room manager at
+        # each room's activation and finish boundaries -- a lobby-only socket
+        # holds no game, and a two-player game is one game, not two -- so this
+        # handler deliberately does not also count active games per socket.
+        with metrics.track_ws_connection(_ENDPOINT):
             while True:
                 raw = await websocket.receive_text()
 
@@ -221,12 +221,14 @@ async def multiplayer_endpoint(websocket: WebSocket) -> None:
                             message.to_square,
                             message.promotion,
                         )
-                        metrics.inc_move(_ENDPOINT)
 
                         if not result.ok:
                             # Server-authoritative rejection: forward the
                             # manager's error to this socket ONLY and do not
-                            # relay or advance the position (Constraint 12).
+                            # relay or advance the position (Constraint 12). A
+                            # rejected move is NOT a processed move -- it is
+                            # counted only as an illegal rejection here, never in
+                            # MOVES_PROCESSED.
                             if result.error is not None:
                                 await websocket.send_text(protocol.serialize(result.error))
                                 if result.error.code == _ILLEGAL_MOVE_CODE:
@@ -234,9 +236,11 @@ async def multiplayer_endpoint(websocket: WebSocket) -> None:
                                 logger.info("move_rejected", room=code, error=result.error.code)
                             continue
 
-                        # Accepted: broadcast the new authoritative state to
-                        # both players, and the terminal message if the move
-                        # ended the game.
+                        # Accepted and applied: count exactly one processed move,
+                        # then broadcast the new authoritative state to both
+                        # players, and the terminal message if the move ended the
+                        # game.
+                        metrics.inc_move(_ENDPOINT)
                         room = manager.get_room(code)
                         if room is not None and result.state is not None:
                             await manager.broadcast(room, result.state)

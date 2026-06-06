@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 
 import chess
 
+from chess_ai.observability import metrics
 from chess_ai.rooms import protocol
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,11 @@ _COLOR_BLACK = "black"
 _STATUS_WAITING = "waiting"
 _STATUS_ACTIVE = "active"
 _STATUS_FINISHED = "finished"
+
+# Active-games gauge label. Every room this manager owns is a multiplayer game,
+# so the gauge is incremented once when a room activates and decremented once
+# when it finishes, under this fixed mode label.
+_METRICS_MODE = "multiplayer"
 
 
 def color_name(turn: bool) -> str:
@@ -276,6 +282,11 @@ class RoomManager:
             color=_COLOR_BLACK, player_token=token, connected=True
         )
         room.status = _STATUS_ACTIVE
+        # The room just transitioned waiting -> active, so exactly one game is now
+        # in progress. This is the single activation point, so counting here makes
+        # the active-games gauge track games rather than sockets: a lobby-only
+        # (waiting) room is never counted, and a two-player game counts once.
+        metrics.inc_active_game(_METRICS_MODE)
         logger.info("room joined: %s", room.code)
         return protocol.RoomJoinedMessage(code=room.code, color=_COLOR_BLACK, player_token=token)
 
@@ -380,9 +391,19 @@ class RoomManager:
 
     def _finish(self, room: Room, *, result: str, winner: str | None) -> protocol.GameOverMessage:
         """Mark a room finished and return its ``GameOverMessage``."""
+        # Release the active-games gauge only when the room was actually active
+        # (the single state inc_active_game counted on activation). A room
+        # finished from any other state -- e.g. a creator resigning while still
+        # waiting for an opponent -- was never counted, so it must not decrement
+        # and drive the gauge below zero. This is the single finish chokepoint
+        # (checkmate/stalemate/draw, resignation, and disconnect forfeit all route
+        # through here), so one decrement here balances the one increment on join.
+        was_active = room.status == _STATUS_ACTIVE
         room.status = _STATUS_FINISHED
         room.winner = winner
         room.result = result
+        if was_active:
+            metrics.dec_active_game(_METRICS_MODE)
         logger.info("game over in %s: %s (winner=%s)", room.code, result, winner)
         return protocol.GameOverMessage(
             result=result, winner=winner, reason=_result_reason(result, winner)

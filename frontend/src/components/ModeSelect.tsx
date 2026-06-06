@@ -100,13 +100,7 @@ export function ModeSelect({ onSelectAi, onPlayOnline, onWatchSelfPlay }: ModeSe
                 className="flex items-center justify-between rounded-lg bg-gray-700 px-4 py-3 text-left text-gray-100 hover:bg-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400 motion-safe:transition-colors"
               >
                 <span className="font-medium">{tier.label}</span>
-                {/* BLITZY [A11Y]: supplementary tier blurb is intentionally muted
-                    (text-secondary #9ca3af) per the design source; on the gray-700
-                    surface this computes ~3.8:1, below WCAG AA 4.5:1 for small text.
-                    Implemented per design and flagged for designer review — the
-                    high-contrast tier label carries the meaning, so color is not
-                    the sole indicator. */}
-                <span className="text-xs text-secondary">{tier.blurb}</span>
+                <span className="text-xs text-gray-200">{tier.blurb}</span>
               </button>
             ))}
           </div>

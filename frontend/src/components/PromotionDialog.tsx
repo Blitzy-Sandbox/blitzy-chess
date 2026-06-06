@@ -20,12 +20,19 @@
  * choice (or cancellation) through its callbacks.
  *
  * Rendering / accessibility notes:
- *   - Returns `null` when `open` is `false`, so a parent can mount it
- *     unconditionally and gate visibility purely through the prop. The
- *     short-circuit is the very first statement — nothing renders while closed.
- *   - The full-screen backdrop is a presentational dismiss target: clicking it
- *     calls `onCancel`. The dialog card stops click propagation so choosing a
- *     piece (or clicking empty card space) never also triggers `onCancel`.
+ *   - Visibility is gated by the `open` prop, so a parent can mount it
+ *     unconditionally. An effect (declared before the early `null` return to keep
+ *     the hook order stable per the Rules of Hooks) binds a document-level
+ *     Escape-key listener only while open, so keyboard users can dismiss the
+ *     pending promotion without a pointer; it is removed on close/unmount.
+ *   - The first piece button (Queen) receives initial focus via `autoFocus`, so
+ *     a keyboard or screen-reader user lands inside the dialog and can Tab across
+ *     the choices and the Cancel control.
+ *   - Dismissal is reachable three ways: clicking the full-screen backdrop (a
+ *     presentational dismiss target), pressing Escape, and a visible
+ *     `<button>Cancel</button>` inside the card. The dialog card stops click
+ *     propagation so choosing a piece (or clicking empty card space) never also
+ *     triggers `onCancel`.
  *   - The card is a labelled modal dialog (`role="dialog"`, `aria-modal="true"`,
  *     `aria-label`). Each piece is a real `<button type="button">` with a
  *     descriptive `aria-label` (e.g. "Promote to Queen"), so the picker is
@@ -37,6 +44,7 @@
  *
  * @module components/PromotionDialog
  */
+import { useEffect } from 'react';
 import type { Color, PromotionPiece } from '../types';
 
 /**
@@ -60,8 +68,9 @@ interface PromotionDialogProps {
    */
   onSelect: (piece: PromotionPiece) => void;
   /**
-   * Invoked when the player dismisses the dialog (by clicking the backdrop)
-   * without choosing a piece. The parent discards the pending move.
+   * Invoked when the player dismisses the dialog without choosing a piece —
+   * by clicking the backdrop, pressing Escape, or activating the Cancel button.
+   * The parent discards the pending move.
    */
   onCancel: () => void;
 }
@@ -101,14 +110,34 @@ const GLYPHS: Record<Color, Record<PromotionPiece, string>> = {
  *
  * Renders `null` while `open` is `false`. When open, it shows a centered modal
  * card over a dismiss backdrop, with one button per promotion piece drawn in the
- * player's color.
+ * player's color, plus a Cancel control. The first piece is auto-focused and
+ * Escape dismisses the dialog, so the picker is fully keyboard-operable.
  *
  * @param props - See {@link PromotionDialogProps}.
  * @returns The modal element, or `null` when `open` is `false`.
  */
 export function PromotionDialog({ open, color, onSelect, onCancel }: PromotionDialogProps) {
+  // Escape-key dismissal. The listener is attached to `document` only while the
+  // dialog is open and torn down on close/unmount, giving keyboard users a way to
+  // cancel the pending promotion without a pointer. This hook is declared BEFORE
+  // the early `null` return below so the hook order stays stable across renders
+  // (React's Rules of Hooks) — guarding the body on `open` keeps it inert while
+  // the dialog is closed.
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        onCancel();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open, onCancel]);
+
   // Visibility is driven entirely by the prop: nothing renders while closed.
-  // This short-circuit MUST come first — no hidden-but-present modal.
+  // This short-circuit MUST come after the hook above — no hidden-but-present modal.
   if (!open) return null;
 
   return (
@@ -126,10 +155,13 @@ export function PromotionDialog({ open, color, onSelect, onCancel }: PromotionDi
       >
         <h2 className="mb-4 text-center text-lg font-semibold text-gray-100">Promote pawn</h2>
         <div className="flex gap-3">
-          {PIECES.map(({ piece, name }) => (
+          {PIECES.map(({ piece, name }, index) => (
             <button
               key={piece}
               type="button"
+              // Land keyboard/screen-reader focus inside the dialog on the most
+              // common choice (Queen) so the picker is operable without a pointer.
+              autoFocus={index === 0}
               onClick={() => onSelect(piece)}
               aria-label={`Promote to ${name}`}
               className="flex h-16 w-16 items-center justify-center rounded-lg bg-gray-700 text-4xl leading-none text-gray-100 hover:bg-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400 motion-safe:transition-colors"
@@ -138,6 +170,18 @@ export function PromotionDialog({ open, color, onSelect, onCancel }: PromotionDi
             </button>
           ))}
         </div>
+        {/*
+         * Visible, keyboard-reachable cancel control. Backdrop-click and Escape
+         * also dismiss, but a focusable button keeps the abort path available to
+         * pointer-free users who Tab through the dialog.
+         */}
+        <button
+          type="button"
+          onClick={onCancel}
+          className="mt-4 w-full rounded-lg bg-gray-700 px-4 py-2 text-sm font-medium text-gray-200 hover:bg-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400 motion-safe:transition-colors"
+        >
+          Cancel
+        </button>
       </div>
     </div>
   );

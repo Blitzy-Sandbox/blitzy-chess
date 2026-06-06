@@ -31,6 +31,8 @@ __all__ = [
     "metrics_app",
     "setup_metrics",
     "track_active_game",
+    "inc_active_game",
+    "dec_active_game",
     "track_ws_connection",
     "record_search",
     "inc_move",
@@ -169,6 +171,35 @@ def track_active_game(mode: str = "ai") -> Iterator[None]:
         yield
     finally:
         ACTIVE_GAMES.labels(mode).dec()
+
+
+def inc_active_game(mode: str = "ai") -> None:
+    """Increment the active-games gauge for ``mode`` by one.
+
+    A non-scoped counterpart to :func:`track_active_game` for callers whose
+    game lifetime is not bounded by a single ``with`` block. The multiplayer
+    room manager pairs this with :func:`dec_active_game` at a room's activation
+    and finish boundaries, so the gauge counts rooms that are actually in
+    progress rather than open sockets (a lobby-only socket holds no game, and a
+    two-player game is one game, not two).
+
+    Args:
+        mode: Game mode label, ``"ai"`` or ``"multiplayer"``.
+    """
+    ACTIVE_GAMES.labels(mode).inc()
+
+
+def dec_active_game(mode: str = "ai") -> None:
+    """Decrement the active-games gauge for ``mode`` by one.
+
+    The release counterpart to :func:`inc_active_game`. The caller pairs exactly
+    one decrement with each increment (the room manager only decrements a room it
+    previously counted as active), so the gauge never drops below zero.
+
+    Args:
+        mode: Game mode label, ``"ai"`` or ``"multiplayer"``.
+    """
+    ACTIVE_GAMES.labels(mode).dec()
 
 
 @contextmanager

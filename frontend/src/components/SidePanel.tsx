@@ -194,21 +194,21 @@ export function SidePanel({
         <button
           type="button"
           onClick={onNewGame}
-          className="flex min-h-11 flex-1 items-center justify-center rounded bg-green-700 px-3 py-2 font-medium text-gray-100 hover:bg-green-600"
+          className="flex min-h-11 flex-1 items-center justify-center rounded bg-green-700 px-3 py-2 font-medium text-gray-100 hover:bg-green-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-green-400"
         >
           New game
         </button>
         <button
           type="button"
           onClick={onFlip}
-          className="flex min-h-11 flex-1 items-center justify-center rounded bg-gray-700 px-3 py-2 font-medium text-gray-100 hover:bg-gray-600"
+          className="flex min-h-11 flex-1 items-center justify-center rounded bg-gray-700 px-3 py-2 font-medium text-gray-100 hover:bg-gray-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
         >
           Flip board
         </button>
         <button
           type="button"
           onClick={onResign}
-          className="flex min-h-11 flex-1 items-center justify-center rounded bg-red-800 px-3 py-2 font-medium text-gray-100 hover:bg-red-700"
+          className="flex min-h-11 flex-1 items-center justify-center rounded bg-red-800 px-3 py-2 font-medium text-gray-100 hover:bg-red-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-400"
         >
           Resign
         </button>

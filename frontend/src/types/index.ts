@@ -63,12 +63,12 @@ export type GameStatus = 'waiting' | 'active' | 'finished';
 export type GameResult = 'checkmate' | 'stalemate' | 'draw' | 'resignation' | 'timeout';
 
 /**
- * `ErrorMessage.code` values. The first five are the canonical, commonly
- * handled codes; the trailing `(string & {})` keeps editor autocomplete for
- * those members while still accepting any other server-sent string, so a future
- * or less-common backend code never breaks compilation. The backend
- * `ErrorCode` `StrEnum` additionally defines `'game_not_active'` and
- * `'reconnect_failed'`, both of which type-check via the open fallback.
+ * `ErrorMessage.code` values. This is the exact, CLOSED mirror of the backend
+ * `ErrorCode` `StrEnum` in `rooms/protocol.py`: every one of the seven
+ * server-defined codes is listed explicitly and there is no open
+ * `(string & {})` fallback, so the union is a finite, field-for-field parity of
+ * the backend's closed set and a `switch (error.code)` over it can be narrowed
+ * exhaustively.
  */
 export type ErrorCode =
   | 'illegal_move'
@@ -76,7 +76,8 @@ export type ErrorCode =
   | 'room_not_found'
   | 'room_full'
   | 'invalid_message'
-  | (string & {});
+  | 'game_not_active'
+  | 'reconnect_failed';
 
 /**
  * The squares of the most recent move, mirroring `StateMessage.last_move`
@@ -96,14 +97,17 @@ export interface SquareMove {
  * A move submitted by a client. The server reconstructs and validates the move
  * from `from_square`, `to_square`, and `promotion` (via `board.is_legal`); it is
  * the sole authority on legality. `promotion` is `null`/omitted for non-promoting
- * moves. The backend tolerates an optional `san` telemetry field, but the
- * frontend never sends it, so it is intentionally not modeled here.
+ * moves. `san` mirrors the backend `MoveMessage.san` telemetry field for
+ * field-for-field parity: it is optional (the backend defaults it to `null` and
+ * never trusts it), and the frontend leaves it unset, but it is modeled here so
+ * the contract matches `rooms/protocol.py` exactly.
  */
 export interface MoveMessage {
   type: 'move';
   from_square: string;
   to_square: string;
   promotion?: PromotionPiece | null;
+  san?: string | null;
 }
 
 /** Request to create a new multiplayer room. No payload beyond the discriminant. */
@@ -131,11 +135,12 @@ export interface ReconnectMessage {
 /**
  * Request to resign the current game. The connection identifies the player;
  * `player_token` is optional and used only when the transport prefers explicit
- * identification.
+ * identification. Mirrors the backend `ResignMessage.player_token: str | None`
+ * (default `null`): optional here, and `| null` so the nullable case matches.
  */
 export interface ResignMessage {
   type: 'resign';
-  player_token?: string;
+  player_token?: string | null;
 }
 
 // ===========================================================================
@@ -145,9 +150,12 @@ export interface ResignMessage {
 /**
  * Authoritative position snapshot. `move_history` is the ordered list of SAN
  * strings (e.g. `['e4', 'e5', 'Nf3']`) that `MoveHistory.tsx` pairs into
- * numbered rows. `last_move` is `null` before any move is made. Terminal info is
- * carried primarily by {@link GameOverMessage}, so `winner` / `result` are
- * optional here and present only on snapshots that also report a result.
+ * numbered rows. `last_move` is `null` before any move is made. The backend
+ * serializes every dataclass field (`json.dumps(asdict(msg))`), so `winner` and
+ * `result` are ALWAYS present on the wire — `null` for a live position and a
+ * value on a snapshot that also reports a result — and are therefore required
+ * here with `| null`, not optional. Terminal info is still carried primarily by
+ * {@link GameOverMessage}.
  */
 export interface StateMessage {
   type: 'state';
@@ -157,15 +165,18 @@ export interface StateMessage {
   status: GameStatus;
   in_check: boolean;
   last_move: SquareMove | null;
-  winner?: Color | null;
-  result?: string;
+  winner: Color | null;
+  result: string | null;
 }
 
 /**
  * AI search-progress update, emitted by `/ws/game` as the engine thinks.
  * `evaluation` is in centipawns from White's point of view (positive means
- * White is better). `pv` is the principal variation as SAN strings. `mate_in`
- * is `null` when there is no forced mate.
+ * White is better). `pv` is the principal variation as SAN strings. The backend
+ * serializes every dataclass field (`json.dumps(asdict(msg))`) with `None`
+ * defaults, so `time_s`, `nps`, `mate_in`, and `seldepth` are ALWAYS present on
+ * the wire and are therefore required here with `| null` (e.g. `mate_in` is
+ * `null` when there is no forced mate), not optional.
  */
 export interface AiThinkingMessage {
   type: 'ai_thinking';
@@ -173,10 +184,10 @@ export interface AiThinkingMessage {
   evaluation: number;
   pv: string[];
   nodes: number;
-  time_s?: number;
-  nps?: number;
-  mate_in?: number | null;
-  seldepth?: number;
+  time_s: number | null;
+  nps: number | null;
+  mate_in: number | null;
+  seldepth: number | null;
 }
 
 /**

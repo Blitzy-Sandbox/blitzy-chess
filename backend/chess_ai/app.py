@@ -24,9 +24,8 @@ from typing import TYPE_CHECKING
 from asgi_correlation_id import CorrelationIdMiddleware
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import Response
 
 from chess_ai.api import game_ws, health, multiplayer_ws
 from chess_ai.config import ensure_dirs, settings
