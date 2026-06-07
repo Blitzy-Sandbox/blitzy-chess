@@ -74,6 +74,10 @@ beforeEach(() => {
   fetchSpy = vi.fn();
   vi.stubGlobal('fetch', fetchSpy);
   localStorage.clear();
+  // Boot every test from the app root (mode-select) by default. The self-play
+  // routing test below sets `/self-play` itself; resetting here keeps a prior
+  // test from leaving the path on `/self-play` and booting the wrong screen.
+  window.history.pushState({}, '', '/');
 });
 
 afterEach(() => {
@@ -130,3 +134,27 @@ describe('App captured-pieces wiring (AAP §0.5.3)', () => {
     ).toBeInTheDocument();
   });
 });
+
+describe('App self-play URL routing (Issue 2 — recorded-demo entry point)', () => {
+  it('boots directly into SelfPlayView when loaded at /self-play', () => {
+    // The self-play recorder navigates Chromium straight to `/self-play`; the SPA
+    // must mount SelfPlayView (which installs window.__BLITZY_SELF_PLAY__ for the
+    // runner) rather than the default mode-select landing screen.
+    window.history.pushState({}, '', '/self-play');
+    render(<App />);
+
+    // SelfPlayView's heading + commentary feed are present...
+    expect(
+      screen.getByRole('heading', { name: /self-play demonstration/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/waiting for the self-play feed/i)).toBeInTheDocument();
+    // ...and the mode-select landing heading is NOT rendered.
+    expect(screen.queryByRole('heading', { name: /^blitzy chess$/i })).not.toBeInTheDocument();
+
+    // The render hook the runner waits on is installed by the mounted view, so
+    // the runner's `wait_for_function(ready)` now resolves and `render(state)`
+    // advances the live board on the recording.
+    expect(window.__BLITZY_SELF_PLAY__?.ready).toBe(true);
+  });
+});
+

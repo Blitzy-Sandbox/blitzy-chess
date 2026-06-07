@@ -556,6 +556,34 @@ type View =
   | { name: 'self-play' };
 
 /**
+ * The URL path the self-play demonstration screen is served at (AAP §0.5.3).
+ * The self-play recorder (`backend/chess_ai/self_play/runner.py`) navigates
+ * Chromium directly to this path to record the live board, so the SPA must boot
+ * straight to {@link SelfPlayView} when loaded here rather than the default
+ * mode-select screen. The backend SPA fallback serves `index.html` for this
+ * path (it is not a reserved backend prefix), so a deep link / direct load
+ * reaches this router with `window.location.pathname === '/self-play'`.
+ */
+const SELF_PLAY_PATH = '/self-play';
+
+/**
+ * Resolve the screen to show on first paint from the current URL path. A direct
+ * load of `/self-play` (as the self-play recorder performs) boots into the
+ * self-play view immediately; every other path boots into mode-select. Reading
+ * the path on boot is the routing seam that makes the recorded demonstration
+ * capture the live board instead of the landing screen. Guarded so a non-browser
+ * (test/SSR) environment without `window` safely defaults to mode-select.
+ *
+ * @returns The initial {@link View}.
+ */
+function initialView(): View {
+  if (typeof window !== 'undefined' && window.location.pathname === SELF_PLAY_PATH) {
+    return { name: 'self-play' };
+  }
+  return { name: 'mode-select' };
+}
+
+/**
  * App — the SPA root. A tiny `useState` state machine routes between the five
  * screens without a router library; the lobby and multiplayer game share one
  * screen ({@link OnlineScreen}) so the multiplayer socket survives the
@@ -565,7 +593,10 @@ type View =
  * @returns The currently routed screen.
  */
 export default function App() {
-  const [view, setView] = useState<View>({ name: 'mode-select' });
+  // Lazy initializer: the screen on first paint is derived from the URL path so
+  // a direct load of `/self-play` (the self-play recorder's entry point) mounts
+  // SelfPlayView immediately. See {@link initialView}.
+  const [view, setView] = useState<View>(initialView);
 
   // Navigation handlers, memoized so the screens they are passed to do not
   // re-render purely because App re-rendered.
@@ -576,6 +607,22 @@ export default function App() {
   );
   const goOnline = useCallback((): void => setView({ name: 'online' }), []);
   const goSelfPlay = useCallback((): void => setView({ name: 'self-play' }), []);
+
+  // Keep the URL path in step with the active screen so a reload restores the
+  // same screen and the self-play recorder's direct `/self-play` load round-trips
+  // cleanly. Only the self-play screen owns a dedicated path; every other screen
+  // shares the app root. `replaceState` (not `pushState`) keeps this in-component
+  // state machine the single source of truth without growing the history stack.
+  // Guarded for non-browser (test/SSR) environments.
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.history?.replaceState !== 'function') {
+      return;
+    }
+    const desiredPath = view.name === 'self-play' ? SELF_PLAY_PATH : '/';
+    if (window.location.pathname !== desiredPath) {
+      window.history.replaceState(null, '', desiredPath);
+    }
+  }, [view.name]);
 
   switch (view.name) {
     case 'mode-select':

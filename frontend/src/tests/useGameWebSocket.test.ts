@@ -233,6 +233,38 @@ describe('useGameWebSocket', () => {
     expect(result.current.connected).toBe(true);
   });
 
+  it('does not reconnect after a terminal game_over close (preserves the final board)', () => {
+    vi.useFakeTimers();
+    const { result } = renderHook(() =>
+      useGameWebSocket({ difficulty: 'hard', humanColor: 'white' }),
+    );
+    const first = lastInstance();
+    act(() => first.triggerOpen());
+    expect(result.current.connected).toBe(true);
+
+    // The AI game-over sequence: the server sends the terminal result and then
+    // closes the socket.
+    const over: GameOverMessage = {
+      type: 'game_over',
+      result: 'resignation',
+      winner: 'black',
+      reason: 'White resigned',
+    };
+    act(() => first.triggerMessage(over));
+    act(() => first.triggerClose());
+
+    // A terminal close must NOT schedule a reconnect: advancing every pending
+    // timer opens NO new socket, so the server never starts a spurious new game
+    // (which would reset the board/history shown behind the game-over overlay).
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    expect(MockWebSocket.instances.length).toBe(1);
+    expect(result.current.connected).toBe(false);
+    // The terminal result remains available so the overlay stays shown.
+    expect(result.current.gameOver?.result).toBe('resignation');
+  });
+
   it('never uses fetch/REST for game moves (C16)', () => {
     const { result } = mountOpen({ difficulty: 'easy' });
     act(() => result.current.sendMove('e2', 'e4'));

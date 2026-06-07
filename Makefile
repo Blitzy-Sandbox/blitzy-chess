@@ -61,6 +61,31 @@ define ensure_venv
 @$(PY) -m pip install --upgrade pip setuptools wheel
 endef
 
+# --- Canned recipe: ensure a system ffmpeg with an MP4 muxer is installed ----
+# The self-play recorder (`make self-play`) records the browser as WebM via
+# Playwright and then transcodes to the MP4 the project mandates (AAP §0.1.2
+# Constraint 14). Playwright's bundled ffmpeg muxes only WebM, so a full system
+# ffmpeg (with an MP4 muxer + libx264) is required to produce the artifact. This
+# installs one when missing. It is best-effort and OS-aware: an already-present
+# ffmpeg short-circuits; apt-get (Debian/Ubuntu) and Homebrew (macOS) are
+# handled; anything else prints actionable guidance WITHOUT failing `init`,
+# since ffmpeg is only needed for `self-play` (not dev/build/test).
+define ensure_ffmpeg
+@if command -v ffmpeg >/dev/null 2>&1; then \
+	echo "==> ffmpeg already present: $$(command -v ffmpeg)"; \
+elif command -v apt-get >/dev/null 2>&1; then \
+	echo "==> Installing system ffmpeg via apt-get (required by 'make self-play' to mux MP4)"; \
+	if [ "$$(id -u)" = "0" ]; then apt-get update && apt-get install -y ffmpeg; \
+	elif command -v sudo >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y ffmpeg; \
+	else echo "WARNING: root privileges are required to apt-get install ffmpeg; install it manually so 'make self-play' can mux MP4."; fi; \
+elif command -v brew >/dev/null 2>&1; then \
+	echo "==> Installing system ffmpeg via Homebrew (required by 'make self-play' to mux MP4)"; \
+	brew install ffmpeg; \
+else \
+	echo "WARNING: no apt-get or brew found; install a system ffmpeg with an MP4 muxer manually so 'make self-play' can produce the required MP4."; \
+fi
+endef
+
 .DEFAULT_GOAL := help
 
 .PHONY: help init dev build start self-play test test-backend test-frontend \
@@ -82,10 +107,11 @@ help: ## Show this help — every target with a one-line description
 #  Setup
 # ============================================================================
 
-init: ## One-time setup from a clean machine: venv, backend+dev deps, Playwright, frontend deps, opening book
+init: ## One-time setup from a clean machine: venv, backend+dev deps, Playwright, system ffmpeg, frontend deps, opening book
 	$(ensure_venv)
 	$(PIP) install -r $(BACKEND_DIR)/requirements.txt -r $(BACKEND_DIR)/requirements-dev.txt
 	$(PLAYWRIGHT) install chromium
+	$(ensure_ffmpeg)
 	cd $(FRONTEND_DIR) && npm install
 	$(PY) $(BACKEND_DIR)/scripts/download_book.py
 	@echo "==> Setup complete. Next: 'make dev' (development) or 'make start' (production-style)."
@@ -109,7 +135,7 @@ build: ## Build the production frontend bundle into frontend/dist
 start: build ## Build, then serve API + WebSocket + static SPA via one Uvicorn process (no reload)
 	cd $(BACKEND_DIR) && $(UVICORN) chess_ai.app:app --port $(PORT)
 
-self-play: ## Run the AI self-play demo (drives the browser; records backend/games/self_play_*.mp4 + transcript)
+self-play: build ## Build the frontend, then run the AI self-play demo (drives the browser; records backend/games/self_play_*.mp4 + transcript)
 	cd $(BACKEND_DIR) && $(PY) -m chess_ai.self_play.runner
 
 # ============================================================================

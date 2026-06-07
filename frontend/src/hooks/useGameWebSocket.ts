@@ -135,6 +135,14 @@ export function useGameWebSocket(params: UseGameWebSocketParams): UseGameWebSock
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptsRef = useRef<number>(0);
+  // Set once the server reports a terminal result (`game_over`). A terminal
+  // game's socket close is EXPECTED — the server closes the socket right after
+  // the result — so `onclose` must NOT reconnect: a fresh `/ws/game` connection
+  // is treated as a brand-new game by the server, which would reset the final
+  // position shown behind the game-over overlay. Reset at the start of every
+  // fresh connection effect (new game / param change). Mirrors the server-side
+  // guard that already prevents reconnecting to a finished multiplayer room.
+  const terminalRef = useRef<boolean>(false);
 
   /**
    * Serialize and send an outbound message, but only when the socket is open.
@@ -191,6 +199,11 @@ export function useGameWebSocket(params: UseGameWebSocketParams): UseGameWebSock
     // closure's socket handlers become no-ops, so StrictMode's first (discarded)
     // mount can never schedule a reconnect or mutate state after teardown.
     let cancelled = false;
+    // A fresh connection effect run is always a brand-new game (initial mount,
+    // `newGame()` via the generation bump, or a difficulty/color change), so it
+    // starts non-terminal; a prior game's terminal flag must never suppress this
+    // game's legitimate reconnects.
+    terminalRef.current = false;
 
     const clearReconnectTimer = (): void => {
       if (reconnectTimerRef.current !== null) {
@@ -227,6 +240,11 @@ export function useGameWebSocket(params: UseGameWebSocketParams): UseGameWebSock
           break;
         case 'game_over':
           setGameOver(message);
+          // Mark the connection terminal so the imminent server-side close does
+          // not trigger an auto-reconnect (which would open a brand-new game and
+          // reset the board behind the overlay). See `terminalRef` and the
+          // `onclose` guard below.
+          terminalRef.current = true;
           // The game has ended and the engine is idle; clear any lingering
           // search progress so the thinking indicator never persists past the
           // result.
@@ -282,6 +300,14 @@ export function useGameWebSocket(params: UseGameWebSocketParams): UseGameWebSock
           return;
         }
         setConnected(false);
+        // A terminal close (the server closes the socket right after sending
+        // `game_over`) is expected and must NOT reconnect: a fresh `/ws/game`
+        // connection is treated as a brand-new game by the server, which would
+        // reset the final position shown behind the game-over overlay. Only an
+        // UNEXPECTED drop falls through to the backoff reconnect below.
+        if (terminalRef.current) {
+          return;
+        }
         // Capped exponential backoff: delay = min(cap, BASE * 2 ** attempts).
         // This branch runs only on an UNEXPECTED close — intentional closes
         // (newGame / unmount) detach this handler first, so they never schedule
