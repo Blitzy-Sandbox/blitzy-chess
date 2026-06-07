@@ -144,9 +144,7 @@ describe('App self-play URL routing (Issue 2 — recorded-demo entry point)', ()
     render(<App />);
 
     // SelfPlayView's heading + commentary feed are present...
-    expect(
-      screen.getByRole('heading', { name: /self-play demonstration/i }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /self-play demonstration/i })).toBeInTheDocument();
     expect(screen.getByText(/waiting for the self-play feed/i)).toBeInTheDocument();
     // ...and the mode-select landing heading is NOT rendered.
     expect(screen.queryByRole('heading', { name: /^blitzy chess$/i })).not.toBeInTheDocument();
@@ -157,4 +155,3 @@ describe('App self-play URL routing (Issue 2 — recorded-demo entry point)', ()
     expect(window.__BLITZY_SELF_PLAY__?.ready).toBe(true);
   });
 });
-

@@ -30,8 +30,11 @@ from types import SimpleNamespace
 
 import chess
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from chess_ai.api import health as health_module
 from chess_ai.api.game_ws import _CLOSED_SOCKET_MESSAGE, _send_or_disconnect
 
 
@@ -314,3 +317,83 @@ async def test_send_or_disconnect_sends_when_connected():
     payload = '{"type": "state"}'
     await _send_or_disconnect(ws, payload)
     assert ws.sent == [payload]
+
+
+# ---------------------------------------------------------------------------
+# Readiness probe (Info-2): direct coverage of health._readiness_payload and the
+# /health/ready + /ready route handlers, independent of the application lifespan.
+# ---------------------------------------------------------------------------
+# These tests deliberately do NOT use the session-scoped ``client`` fixture: that
+# client enters the real application lifespan, which sets ``app.state.ready`` on
+# the shared global app, so a readiness assertion against it would depend on test
+# ordering. Each test below builds an ISOLATED FastAPI app that mounts only the
+# health router and whose ``app.state`` is set explicitly here -- making the
+# ready / not-ready / startup-missing branches deterministic while also exercising
+# the route handlers and their 200/503 status mapping.
+def _readiness_client(**state) -> TestClient:
+    """Build a ``TestClient`` over a minimal app exposing only the health router.
+
+    The app carries no lifespan and no engine resources, so the readiness probe is
+    driven solely by the ``app.state`` attributes passed here.
+
+    Args:
+        **state: Attributes to set on ``app.state`` (e.g. ``ready=True``,
+            ``opening_book=object()``). Omit ``ready`` entirely to simulate an
+            application whose startup never initialized the flag.
+
+    Returns:
+        A ``TestClient`` bound to the isolated health-only app.
+    """
+    isolated = FastAPI()
+    isolated.include_router(health_module.router)
+    for name, value in state.items():
+        setattr(isolated.state, name, value)
+    return TestClient(isolated)
+
+
+def test_readiness_fails_closed_when_startup_flag_missing():
+    """No ``app.state.ready`` -> the probe fails closed: 503 with ``startup_state`` missing."""
+    with _readiness_client() as ready_client:
+        response = ready_client.get("/health/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    # A never-initialized flag is surfaced explicitly so operators can tell
+    # "startup has not run" apart from "startup ran but is not ready yet".
+    assert body["startup_state"] == "missing"
+    assert body["opening_book"] is False
+    assert body["tablebase"] is False
+
+
+def test_readiness_reports_ready_when_startup_complete():
+    """Truthy ``ready`` flag -> 200 ready; loaded optional resources surface as ``True``."""
+    with _readiness_client(ready=True, opening_book=object(), tablebase=object()) as ready_client:
+        response = ready_client.get("/health/ready")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ready"
+    assert body["opening_book"] is True
+    assert body["tablebase"] is True
+    # ``startup_state`` is emitted ONLY when the flag was never initialized.
+    assert "startup_state" not in body
+
+
+def test_readiness_not_ready_when_flag_explicitly_false():
+    """An explicit ``ready=False`` -> 503 not_ready, and NO ``startup_state`` (flag present)."""
+    with _readiness_client(ready=False) as ready_client:
+        response = ready_client.get("/health/ready")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "not_ready"
+    assert "startup_state" not in body
+    assert body["opening_book"] is False
+    assert body["tablebase"] is False
+
+
+def test_ready_alias_matches_health_ready():
+    """The ``/ready`` alias returns the same body and status as ``/health/ready``."""
+    with _readiness_client(ready=True) as ready_client:
+        primary = ready_client.get("/health/ready")
+        alias = ready_client.get("/ready")
+    assert alias.status_code == primary.status_code == 200
+    assert alias.json() == primary.json()

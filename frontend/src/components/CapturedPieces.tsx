@@ -177,11 +177,7 @@ export function CapturedPieces({ moves = [] }: CapturedPiecesProps) {
         : 'Material is even';
 
   return (
-    <div
-      role="group"
-      aria-label="Captured pieces and material differential"
-      className="space-y-1"
-    >
+    <div role="group" aria-label="Captured pieces and material differential" className="space-y-1">
       {/* White's captures (Black pieces). */}
       <div className="flex flex-wrap items-center gap-0.5 text-xl leading-none text-gray-200">
         <span className="sr-only">
