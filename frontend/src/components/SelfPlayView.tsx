@@ -46,7 +46,7 @@
  *
  * @module components/SelfPlayView
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 
 import { GameBoard } from './GameBoard';
 
@@ -164,6 +164,82 @@ function formatEval(cp: number): string {
   return `${sign}${(cp / 100).toFixed(2)}`;
 }
 
+/** Design maximum board width in pixels (AAP §0.5.3); GameBoard also caps to this. */
+const MAX_BOARD_WIDTH = 640;
+
+/** Horizontal breathing room subtracted from the viewport in the width fallback. */
+const BOARD_VIEWPORT_MARGIN = 32;
+
+/** Floor so the board never collapses on very narrow viewports. */
+const MIN_BOARD_WIDTH = 240;
+
+/**
+ * Clamp a candidate width to the board's design bounds.
+ *
+ * @param available - The raw available width in pixels.
+ * @returns A width within `[MIN_BOARD_WIDTH, MAX_BOARD_WIDTH]`.
+ */
+function clampBoardWidth(available: number): number {
+  return Math.max(MIN_BOARD_WIDTH, Math.min(available, MAX_BOARD_WIDTH));
+}
+
+/**
+ * Estimate a board width from the viewport for the first paint, before the
+ * container has been measured.
+ *
+ * @returns A clamped board width in pixels.
+ */
+function estimateBoardWidth(): number {
+  if (typeof window === 'undefined') {
+    return MAX_BOARD_WIDTH;
+  }
+  return clampBoardWidth(window.innerWidth - BOARD_VIEWPORT_MARGIN);
+}
+
+/**
+ * Size the board to the width of its container, capped at the design maximum.
+ *
+ * react-chessboard renders at a fixed pixel size, so the board is sized from a
+ * measured container width rather than by CSS alone. The container is observed
+ * with a `ResizeObserver` when one is available, with a window-resize listener
+ * as a fallback; the measurement falls back to the viewport when the container
+ * has no laid-out width (for example, the jsdom test environment, where
+ * `ResizeObserver` is absent and `clientWidth` is `0`).
+ *
+ * @returns A tuple of the container ref to attach and the current board width.
+ */
+function useContainerBoardWidth(): [RefObject<HTMLDivElement>, number] {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [width, setWidth] = useState<number>(estimateBoardWidth);
+
+  useEffect(() => {
+    const measure = (): void => {
+      const el = ref.current;
+      const available =
+        el && el.clientWidth > 0 ? el.clientWidth : window.innerWidth - BOARD_VIEWPORT_MARGIN;
+      const next = clampBoardWidth(available);
+      // Skip redundant updates so a stable layout cannot loop the observer.
+      setWidth((prev) => (prev === next ? prev : next));
+    };
+
+    measure();
+
+    let observer: ResizeObserver | undefined;
+    if (typeof ResizeObserver !== 'undefined' && ref.current) {
+      observer = new ResizeObserver(() => measure());
+      observer.observe(ref.current);
+    }
+    window.addEventListener('resize', measure);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, []);
+
+  return [ref, width];
+}
+
 /**
  * Props for {@link SelfPlayView}. The parent (`App.tsx`) owns navigation, so the
  * screen is fully controlled through this single callback.
@@ -196,6 +272,9 @@ export function SelfPlayView({ onExit }: SelfPlayViewProps) {
   const counterRef = useRef(0);
   // The scrollable commentary viewport, driven imperatively to auto-scroll.
   const logRef = useRef<HTMLDivElement | null>(null);
+
+  // Size the board to its container so it never overflows narrow viewports.
+  const [boardWrapRef, boardWidth] = useContainerBoardWidth();
 
   // Translate one pushed state payload into React state. Memoized so the install
   // effect below has a stable dependency and does not reinstall the hook on
@@ -276,21 +355,25 @@ export function SelfPlayView({ onExit }: SelfPlayViewProps) {
         </button>
       </header>
 
-      <div className="flex w-full max-w-5xl flex-col gap-4 md:flex-row">
-        {/* Board — rendered ONLY through GameBoard (C15), mounted read-only. */}
-        <div className="board-cap mx-auto w-full">
+      <div className="flex w-full max-w-5xl flex-col gap-4 lg:flex-row">
+        {/* Board — rendered ONLY through GameBoard (C15), mounted read-only.
+            The board is sized to this wrapper (capped at 640px) so it never
+            overflows a narrow viewport; the two-column split engages only at
+            the lg breakpoint, where the board and panel both fit. */}
+        <div ref={boardWrapRef} className="flex w-full min-w-0 justify-center">
           <GameBoard
             fen={fen}
             orientation="white"
             onMove={() => false}
             lastMove={lastMove}
             draggable={false}
+            boardWidth={boardWidth}
             id="self-play-board"
           />
         </div>
 
         {/* Live commentary panel. */}
-        <aside className="flex w-full flex-col rounded-lg bg-panel p-4 md:max-w-sm">
+        <aside className="flex w-full min-w-0 flex-col rounded-lg bg-panel p-4 lg:max-w-sm">
           <h2 className="mb-2 text-lg font-semibold text-gray-100">
             Commentary
             {matchupKnown && (

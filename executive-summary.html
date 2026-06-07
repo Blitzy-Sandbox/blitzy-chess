@@ -71,7 +71,16 @@
         startOnLoad: true,
         theme: "base",
         securityLevel: "loose",
-        flowchart: { curve: "basis", htmlLabels: true, useMaxWidth: true },
+        // Top-level htmlLabels:false is the flag the Mermaid v11 flowchart-v2
+        // renderer actually honors (the flowchart-scoped flag below is kept for
+        // intent/clarity). SVG <text> labels are measured via getBBox, including
+        // each glyph's full advance width, so they cannot be clipped the way the
+        // HTML foreignObject labels were: the foreignObject width was rounded to
+        // 129px while the label text needed 137px, with overflow:hidden cutting
+        // the final character of every node label at the 1280x720 deck viewport
+        // (QA Issue 3).
+        htmlLabels: false,
+        flowchart: { curve: "basis", htmlLabels: false, useMaxWidth: true },
         themeVariables: {
           background: "#161b2e",
           primaryColor: "#1c2340",

@@ -27,6 +27,7 @@ The chess facts used below are verified and fixed: the Fool's-mate line
 """
 
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -444,10 +445,48 @@ async def test_play_self_play_game_paces_each_move() -> None:
 
     expected_s = SELF_PLAY_MOVE_DELAY_MS / 1000.0  # 5.0
     for delay in sleep.calls:
-        # The runner subtracts the tiny move-computation time, so each delay is
-        # just under the full budget but never exceeds it.
+        # The hold is measured from after the render is dispatched, so with the
+        # instant test render each delay is the full budget (a real render only
+        # shaves its own tiny duration) and never exceeds it.
         assert 0 < delay <= expected_s
         assert delay == pytest.approx(expected_s, abs=0.5)
+
+
+async def test_play_self_play_game_pacing_excludes_search_time() -> None:
+    """The >=5s/move hold is measured after the render, so a slow search never
+    shortens it (Constraint 14 regression guard).
+
+    A search seam consumes real wall-clock time before returning the scripted
+    move, simulating an engine search that runs for a noticeable fraction of a
+    second (Hard can use its full time budget). The pacing hold is measured from
+    after ``render`` is dispatched, so that search time must NOT be subtracted
+    from it; a search-anchored hold would yield noticeably less than the full
+    budget here.
+    """
+    sleep = RecordingSleep()
+    slow_search_s = 0.3
+
+    async def slow_search(searcher, board, limits):
+        time.sleep(slow_search_s)
+        return searcher.search(board, limits)
+
+    annotations, _result_str, _result_reason = await runner.play_self_play_game(
+        white_searcher=ScriptedSearcher(WHITE_FOOLS_MATE),
+        black_searcher=ScriptedSearcher(BLACK_FOOLS_MATE),
+        evaluator=Evaluator(),
+        sleep=sleep,
+        render=RecordingRender(),
+        search=slow_search,
+    )
+
+    assert len(sleep.calls) == len(annotations) == 4
+    expected_s = SELF_PLAY_MOVE_DELAY_MS / 1000.0  # 5.0
+    # Each hold is the full budget less only the instant render -- the slow
+    # search time is excluded. A search-anchored hold would be ~slow_search_s
+    # short (about 4.7s), so this lower bound fails on the pre-fix behavior.
+    assert min(sleep.calls) >= expected_s - 0.05
+    for delay in sleep.calls:
+        assert delay <= expected_s
 
 
 async def test_play_self_play_game_invokes_render_per_ply() -> None:

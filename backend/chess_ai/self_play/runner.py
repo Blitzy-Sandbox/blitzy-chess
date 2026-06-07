@@ -713,7 +713,6 @@ async def play_self_play_game(
         color = "White" if is_white else "Black"
         limits = SearchLimits.from_tier(tier)
 
-        t0 = time.monotonic()
         result = await search(searcher, board.copy(), limits)
 
         move = result.best_move
@@ -805,12 +804,13 @@ async def play_self_play_game(
             "evalCp": int(score_cp_white),
             "status": status,
         }
+        # Hold the rendered position for at least ``move_delay_ms``, measured
+        # from after the render is dispatched (Constraint C14: >= 5s per move).
+        render_start = time.monotonic()
         await render(state)
-
-        elapsed_move = time.monotonic() - t0
-        remaining = (move_delay_ms / 1000.0) - elapsed_move
-        if remaining > 0:
-            await sleep(remaining)
+        hold_remaining = (move_delay_ms / 1000.0) - (time.monotonic() - render_start)
+        if hold_remaining > 0:
+            await sleep(hold_remaining)
 
     result_str = board.result(claim_draw=True)
     result_reason = _result_reason(board, ply, max_plies)
