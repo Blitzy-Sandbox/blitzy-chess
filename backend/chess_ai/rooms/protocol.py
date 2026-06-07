@@ -34,7 +34,7 @@ dependency-free and instant to import from any layer.
 
 import json
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import MISSING, asdict, dataclass, field, fields
 from enum import StrEnum
 
 
@@ -456,25 +456,54 @@ def _coerce_payload(raw: str | dict) -> dict:
         try:
             decoded = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
-            raise ProtocolError(f"invalid JSON: {exc}") from exc
+            # The client-facing text is generic. The decoder's positional
+            # detail (line/column/char) is interpreter-internal, so it is
+            # withheld from the client and chained on ``exc`` for server logs.
+            raise ProtocolError("invalid JSON: message is not well-formed JSON") from exc
         if not isinstance(decoded, dict):
             raise ProtocolError("decoded message is not a JSON object")
         return decoded
     raise ProtocolError(f"unsupported message type: {type(raw).__name__}")
 
 
+def _required_field_names(cls: type[_Message]) -> list[str]:
+    """Return the constructor field names on ``cls`` that have no default.
+
+    These are the fields a client must supply. The ``type`` discriminator
+    (``init=False``) and any field with a default or default factory are
+    excluded.
+    """
+    return [
+        f.name
+        for f in fields(cls)
+        if f.init and f.default is MISSING and f.default_factory is MISSING
+    ]
+
+
 def _build(cls: type[_Message], payload: dict) -> _Message:
     """Construct ``cls`` from ``payload``, ignoring unknown keys.
 
-    The ``type`` discriminator is dropped so the class default is used. Missing
-    required fields surface as a :class:`ProtocolError`.
+    The ``type`` discriminator is dropped so the class default is used. A
+    payload missing required fields raises a :class:`ProtocolError` that names
+    the absent fields. The ``type`` value and field names are public protocol,
+    so naming them is safe; interpreter-internal text (the dataclass name and
+    the ``__init__()`` argument phrasing) is never echoed to the client.
     """
     field_names = {f.name for f in fields(cls)}
     kwargs = {k: v for k, v in payload.items() if k in field_names and k != "type"}
+    msg_type = payload.get("type")
+    missing = [name for name in _required_field_names(cls) if name not in kwargs]
+    if missing:
+        raise ProtocolError(
+            f"malformed {msg_type!r} message: missing required field(s): {', '.join(missing)}"
+        )
     try:
         return cls(**kwargs)
     except TypeError as exc:
-        raise ProtocolError(f"malformed {payload.get('type')!r} message: {exc}") from exc
+        # Defensive fallback: kwargs are pre-filtered to known fields and the
+        # required ones are checked above, so a TypeError here is unexpected.
+        # The client text stays generic; ``exc`` carries the detail to logs.
+        raise ProtocolError(f"malformed {msg_type!r} message") from exc
 
 
 def _dispatch(raw: str | dict, registry: dict[str, type[_Message]]) -> _Message:
