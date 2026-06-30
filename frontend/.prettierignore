@@ -1,0 +1,11 @@
+# Prettier ignore — keep `make format` (prettier --write .) and the
+# `prettier --check .` gate scoped to hand-authored source only.
+#
+# These entries mirror the build/coverage paths ignored in the repository
+# .gitignore so Prettier never rewrites or flags generated artifacts:
+#   dist/      -> Vite build output (tsc -b && vite build)
+#   coverage/  -> Vitest/coverage reports
+# Without this file Prettier would walk dist/ and report the minified bundles
+# as "code style issues", making the format gate noisy and non-idempotent.
+dist/
+coverage/

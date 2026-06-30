@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Executive summary of blitzy-chess: a web chess platform with a built-from-scratch AI, real-time multiplayer, and a self-playing showcase." />
+    <title>blitzy-chess — Executive Summary</title>
+
+    <!-- reveal.js core + reset (pinned EXACTLY to reveal.js@5.1.0) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css" />
+
+    <!--
+      Inline fallback brand tokens. These mirror the canonical theme so the deck
+      still renders on-brand if the external theme cannot be reached. The Blitzy
+      theme <link> below is loaded LAST, so it always wins when present.
+    -->
+    <style>
+      :root {
+        --blitzy-bg: #0b0e18;
+        --blitzy-bg-2: #11162a;
+        --blitzy-bg-3: #0a0c14;
+        --blitzy-surface: #161b2e;
+        --blitzy-primary: #5b8cff;
+        --blitzy-primary-300: #93b4ff;
+        --blitzy-secondary: #8b5cf6;
+        --blitzy-accent: #22d3ee;
+        --blitzy-text: #e7ecf6;
+        --blitzy-heading: #ffffff;
+        --blitzy-muted: #9aa6c2;
+        --blitzy-gradient: linear-gradient(135deg, #5b8cff 0%, #8b5cf6 55%, #22d3ee 120%);
+        --blitzy-bg-gradient: radial-gradient(1200px 720px at 78% -8%, rgba(91, 140, 255, 0.18), transparent 60%),
+          radial-gradient(900px 620px at 8% 108%, rgba(139, 92, 246, 0.16), transparent 58%),
+          linear-gradient(168deg, #11162a 0%, #0b0e18 56%, #0a0c14 100%);
+        --blitzy-font-body: "Inter", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+        --r-background-color: #0b0e18;
+        --r-main-color: #e7ecf6;
+        --r-heading-color: #ffffff;
+        --r-link-color: #5b8cff;
+      }
+      html,
+      body {
+        background-color: var(--blitzy-bg);
+      }
+      .reveal-viewport {
+        background-color: var(--blitzy-bg);
+        background-image: var(--blitzy-bg-gradient);
+      }
+      .reveal {
+        color: var(--blitzy-text);
+        font-family: var(--blitzy-font-body);
+      }
+    </style>
+
+    <!-- Blitzy brand theme — loaded LAST so it overrides everything above. -->
+    <link rel="stylesheet" href="blitzy-deck/references/blitzy-reveal-theme.css" />
+
+    <!-- Lucide icons (pinned EXACTLY to lucide@0.460.0). Exposes window.lucide. -->
+    <script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+
+    <!--
+      Mermaid (pinned EXACTLY to mermaid@11.4.0), loaded as an ES module per the
+      official no-bundler guidance. This deferred module runs AFTER the
+      end-of-body Reveal.initialize() call, so the architecture slide is laid out
+      before Mermaid measures and renders it.
+    -->
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs";
+      window.mermaid = mermaid;
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "base",
+        securityLevel: "loose",
+        // Top-level htmlLabels:false is the flag the Mermaid v11 flowchart-v2
+        // renderer actually honors (the flowchart-scoped flag below is kept for
+        // intent/clarity). SVG <text> labels are measured via getBBox, including
+        // each glyph's full advance width, so they cannot be clipped the way the
+        // HTML foreignObject labels were: the foreignObject width was rounded to
+        // 129px while the label text needed 137px, with overflow:hidden cutting
+        // the final character of every node label at the 1280x720 deck viewport
+        // (QA Issue 3).
+        htmlLabels: false,
+        flowchart: { curve: "basis", htmlLabels: false, useMaxWidth: true },
+        themeVariables: {
+          background: "#161b2e",
+          primaryColor: "#1c2340",
+          primaryTextColor: "#e7ecf6",
+          primaryBorderColor: "#5b8cff",
+          secondaryColor: "#232c4d",
+          tertiaryColor: "#161b2e",
+          lineColor: "#8b5cf6",
+          fontFamily: "Inter, Segoe UI, system-ui, sans-serif",
+          fontSize: "16px",
+        },
+      });
+    </script>
+  </head>
+
+  <body>
+    <div class="reveal">
+      <div class="slides">
+        <!-- ============================================================== -->
+        <!-- Slide 1 — Title                                                 -->
+        <!-- ============================================================== -->
+        <section class="slide-title">
+          <div class="brand-lockup">
+            <span class="brand-mark"><i data-lucide="zap"></i></span>
+            <span class="brand-wordmark">Blitz<span class="accent">y</span></span>
+          </div>
+          <p class="eyebrow"><i data-lucide="crown"></i> Executive Summary</p>
+          <h1>blitzy-<span class="gradient-text">chess</span></h1>
+          <hr class="title-rule" />
+          <p class="subtitle">Blitzy takes on Chess</p>
+          <p class="lead">A polished web chess platform — play a smart computer, or a friend, live.</p>
+          <div class="footer-brand"><span class="dot"></span> Blitzy · Autonomous Software Development</div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 2 — The Idea                                              -->
+        <!-- ============================================================== -->
+        <section class="slide-section slide-center">
+          <p class="eyebrow">The Idea</p>
+          <h2>One board. Two ways to play.</h2>
+          <p class="lead">
+            A clean, modern chess app in the browser. Take on a smart computer opponent, or play a
+            friend in real time.
+          </p>
+          <ul class="chip-row" style="justify-content: center">
+            <li class="chip"><i data-lucide="cpu"></i> Play the computer</li>
+            <li class="chip"><i data-lucide="users"></i> Play a friend</li>
+            <li class="chip"><i data-lucide="clapperboard"></i> Watch it play itself</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 3 — What We Delivered                                     -->
+        <!-- ============================================================== -->
+        <section class="slide-pillars">
+          <p class="eyebrow">What We Delivered</p>
+          <h2>Three things, done well.</h2>
+          <ul class="pillar-grid">
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="cpu"></i></span>
+              <p class="pillar__title">Smart AI Opponent</p>
+              <p class="pillar__desc">A computer rival with three skill levels — from a friendly warm-up to a serious challenge.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="users"></i></span>
+              <p class="pillar__title">Real-Time Multiplayer</p>
+              <p class="pillar__desc">Invite a friend with a short code and play live, move for move.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="clapperboard"></i></span>
+              <p class="pillar__title">Self-Playing Showcase</p>
+              <p class="pillar__desc">The AI plays itself on screen, records the game, and narrates every move.</p>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 4 — Play the Computer (difficulty tiers, EXACT values)    -->
+        <!-- ============================================================== -->
+        <section class="slide-table">
+          <p class="eyebrow">Play the Computer</p>
+          <h2>Pick your challenge.</h2>
+          <table class="tier-table">
+            <thead>
+              <tr>
+                <th>Tier</th>
+                <th>Search depth</th>
+                <th>Time per move</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="tier-pill"><span class="tier-dot easy"></span> Easy</span></td>
+                <td>4</td>
+                <td>3 seconds</td>
+              </tr>
+              <tr>
+                <td><span class="tier-pill"><span class="tier-dot medium"></span> Medium</span></td>
+                <td>6</td>
+                <td>8 seconds</td>
+              </tr>
+              <tr>
+                <td><span class="tier-pill"><span class="tier-dot hard"></span> Hard</span></td>
+                <td>8</td>
+                <td>15 seconds</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="callout">
+            <i data-lucide="trending-up"></i>
+            <span>Deeper look-ahead and more thinking time make each tier noticeably stronger.</span>
+          </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 5 — Real-Time Multiplayer                                 -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">Real-Time Multiplayer</p>
+          <h2>Play a friend in seconds.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="check"></i><span>One tap creates a room with a short, shareable <strong>6-character code</strong>.</span></li>
+            <li><i data-lucide="check"></i><span>Your friend joins with the code — no account, no setup.</span></li>
+            <li><i data-lucide="check"></i><span>Moves are relayed live and <strong>checked by the server</strong>, so the game stays fair.</span></li>
+            <li><i data-lucide="check"></i><span>Briefly disconnected? You have <strong>60 seconds</strong> to rejoin and pick up right where you left off.</span></li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 6 — A Built-From-Scratch Brain                            -->
+        <!-- ============================================================== -->
+        <section class="slide-pillars">
+          <p class="eyebrow">A Built-From-Scratch Brain</p>
+          <h2>We built the chess mind ourselves.</h2>
+          <p class="lead" style="max-width: none; font-size: 0.92em">
+            No off-the-shelf engine. Four strengths work together to make strong, human-feeling moves.
+          </p>
+          <ul class="pillar-grid cols-2">
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="book-open"></i></span>
+              <p class="pillar__title">Opening knowledge</p>
+              <p class="pillar__desc">It starts from proven opening ideas, just like a seasoned player.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="gauge"></i></span>
+              <p class="pillar__title">Position judgment</p>
+              <p class="pillar__desc">It weighs who stands better, and why, on every turn.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="telescope"></i></span>
+              <p class="pillar__title">Deep look-ahead</p>
+              <p class="pillar__desc">It reads many moves ahead to find the strongest plan.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="crown"></i></span>
+              <p class="pillar__title">Endgame precision</p>
+              <p class="pillar__desc">It plays tight endgames with exact, textbook technique.</p>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 7 — The Self-Playing Showcase                             -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">The Self-Playing Showcase</p>
+          <h2>The AI puts on a show.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="check"></i><span>The computer plays itself inside the <strong>real game screen</strong>.</span></li>
+            <li><i data-lucide="check"></i><span>Every move holds for at least <strong>five seconds</strong>, so it is easy to follow.</span></li>
+            <li><i data-lucide="check"></i><span>The whole game is captured to a <strong>video file</strong>.</span></li>
+            <li><i data-lucide="check"></i><span>A written, <strong>timestamped commentary</strong> explains the thinking behind each move.</span></li>
+          </ul>
+          <div class="callout">
+            <i data-lucide="clapperboard"></i>
+            <span>You walk away with a shareable highlight reel: a recorded game plus a play-by-play transcript.</span>
+          </div>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 8 — How It Fits Together (Mermaid architecture diagram)   -->
+        <!-- ============================================================== -->
+        <section class="slide-diagram">
+          <p class="eyebrow">How It Fits Together</p>
+          <h2>A simple, sturdy shape.</h2>
+          <div class="diagram-wrap">
+            <div class="mermaid">
+flowchart LR
+  B["Browser App&lt;br/&gt;React + TypeScript"] &lt;==&gt;|live moves| S["Game Server&lt;br/&gt;FastAPI"]
+  S &lt;==&gt;|best move| E["Chess AI&lt;br/&gt;Engine"]
+  S -.-&gt;|saved| G["Game State&lt;br/&gt;and Recordings"]
+            </div>
+          </div>
+          <p class="muted" style="font-size: 0.72em; margin-top: 0.6em">
+            The browser shows the board. The server runs the game and the AI, and has the final say.
+          </p>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 9 — Built to Trust                                        -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">Built to Trust</p>
+          <h2>The server is the referee.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="shield-check"></i><span>Every move is checked on the server before it counts.</span></li>
+            <li><i data-lucide="shield-check"></i><span>Illegal moves are simply refused.</span></li>
+            <li><i data-lucide="shield-check"></i><span>Both players always see the same, correct board.</span></li>
+            <li><i data-lucide="shield-check"></i><span>The result is a fair, consistent game every time.</span></li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 10 — Quality & Visibility                                 -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">Quality &amp; Visibility</p>
+          <h2>We can see how it is running.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="check-check"></i><span><strong>Automated tests</strong> guard the rules and the gameplay.</span></li>
+            <li><i data-lucide="activity"></i><span><strong>Structured logs</strong> and request tracing show exactly what happened.</span></li>
+            <li><i data-lucide="heart-pulse"></i><span>A live <strong>metrics feed</strong> and health checks report system status.</span></li>
+            <li><i data-lucide="layout-dashboard"></i><span>A ready-made <strong>operations dashboard</strong> ships with the project.</span></li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 11 — Easy to Run & Extend                                 -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">Easy to Run &amp; Extend</p>
+          <h2>From clone to running, in one command set.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="terminal"></i><span>A single set of <strong>make</strong> commands runs everything — setup, play, test, and the showcase.</span></li>
+            <li><i data-lucide="rocket"></i><span>Clear onboarding takes a new developer from a blank machine to a running app.</span></li>
+            <li><i data-lucide="file-text"></i><span>A <strong>decision log</strong> records why each important choice was made.</span></li>
+          </ul>
+          <ul class="chip-row">
+            <li class="chip"><i data-lucide="terminal"></i> make init</li>
+            <li class="chip"><i data-lucide="terminal"></i> make dev</li>
+            <li class="chip"><i data-lucide="terminal"></i> make self-play</li>
+            <li class="chip"><i data-lucide="terminal"></i> make test</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 12 — Technology, Briefly                                  -->
+        <!-- ============================================================== -->
+        <section class="slide-section">
+          <p class="eyebrow">Technology, Briefly</p>
+          <h2>Modern, proven tools.</h2>
+          <ul class="feature-list">
+            <li><i data-lucide="server"></i><span>A <strong>Python</strong> backend (FastAPI) runs the game and the AI.</span></li>
+            <li><i data-lucide="monitor"></i><span>A <strong>React</strong> front end draws the board and the controls.</span></li>
+            <li><i data-lucide="radio"></i><span>Live play travels over a fast, always-on connection (WebSocket).</span></li>
+            <li><i data-lucide="shield"></i><span>A trusted chess library enforces the rules.</span></li>
+          </ul>
+          <p class="muted" style="font-size: 0.74em; margin-top: 0.5em">
+            Familiar, well-supported technology — easy to staff and easy to maintain.
+          </p>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 13 — By the Numbers                                       -->
+        <!-- ============================================================== -->
+        <section class="slide-stats">
+          <p class="eyebrow">By the Numbers</p>
+          <h2>Highlights at a glance.</h2>
+          <ul class="stat-grid">
+            <li class="stat">
+              <span class="stat__num">3</span>
+              <span class="stat__label">AI difficulty tiers</span>
+            </li>
+            <li class="stat">
+              <span class="stat__num">6</span>
+              <span class="stat__label">characters in a room code</span>
+            </li>
+            <li class="stat">
+              <span class="stat__num">5s</span>
+              <span class="stat__label">minimum per move in the showcase</span>
+            </li>
+            <li class="stat">
+              <span class="stat__num">100%</span>
+              <span class="stat__label">of moves validated by the server</span>
+            </li>
+          </ul>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 14 — What's Next                                          -->
+        <!-- ============================================================== -->
+        <section class="slide-pillars">
+          <p class="eyebrow">What's Next</p>
+          <h2>Room to grow.</h2>
+          <ul class="pillar-grid">
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="book-open"></i></span>
+              <p class="pillar__title">Richer opening repertoire</p>
+              <p class="pillar__desc">Teach the AI more opening ideas for more variety and surprise.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="target"></i></span>
+              <p class="pillar__title">More tactical coverage</p>
+              <p class="pillar__desc">Add training positions to sharpen its eye for combinations.</p>
+            </li>
+            <li class="pillar">
+              <span class="pillar__icon"><i data-lucide="clock"></i></span>
+              <p class="pillar__title">Optional time controls</p>
+              <p class="pillar__desc">Let players add a chess clock whenever they want one.</p>
+            </li>
+          </ul>
+          <p class="muted" style="font-size: 0.72em; margin-top: 0.6em">
+            Framed as opportunities, not gaps — the core experience is complete today.
+          </p>
+        </section>
+
+        <!-- ============================================================== -->
+        <!-- Slide 15 — Closing                                              -->
+        <!-- ============================================================== -->
+        <section class="slide-closing">
+          <div class="brand-lockup">
+            <span class="brand-mark"><i data-lucide="zap"></i></span>
+            <span class="brand-wordmark">Blitz<span class="accent">y</span></span>
+          </div>
+          <h2>Blitzy takes on Chess.</h2>
+          <p class="lead" style="margin-left: auto; margin-right: auto">
+            A complete, polished chess experience — smart, social, and self-explaining.
+          </p>
+          <p class="chip-row" style="justify-content: center; display: flex">
+            <span class="chip"><i data-lucide="sparkles"></i> Thank you</span>
+          </p>
+          <div class="footer-brand" style="left: 50%; transform: translateX(-50%)">
+            <span class="dot"></span> Blitzy · Autonomous Software Development
+          </div>
+        </section>
+
+
+      </div>
+    </div>
+
+    <!-- reveal.js engine (pinned EXACTLY to reveal.js@5.1.0). Exposes window.Reveal. -->
+    <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+
+    <!--
+      Inline init. Runs during parse, before the deferred Mermaid module above:
+        1. Reveal.initialize(...)  — sets up navigation and lays out all slides.
+        2. lucide.createIcons()    — swaps every <i data-lucide="..."> for an SVG.
+      viewDistance is set high so all 15 slides (including the Mermaid slide) are
+      laid out up front, which lets Mermaid measure and render correctly on load.
+    -->
+    <script>
+      Reveal.initialize({
+        width: 1280,
+        height: 720,
+        margin: 0.06,
+        minScale: 0.2,
+        maxScale: 2.0,
+        center: true,
+        hash: true,
+        controls: true,
+        progress: true,
+        slideNumber: "c/t",
+        transition: "slide",
+        transitionSpeed: "default",
+        backgroundTransition: "fade",
+        viewDistance: 20,
+      });
+
+      // Render all Lucide icons present in the deck.
+      if (window.lucide && typeof window.lucide.createIcons === "function") {
+        window.lucide.createIcons();
+      }
+
+      // Defensive: if a Mermaid diagram is shown before it finished processing
+      // (e.g. when jumping straight to it via the URL hash), nudge a re-run.
+      Reveal.on("slidechanged", function (event) {
+        var pending = event.currentSlide
+          ? event.currentSlide.querySelector(".mermaid:not([data-processed])")
+          : null;
+        if (pending && window.mermaid && typeof window.mermaid.run === "function") {
+          window.mermaid.run({ nodes: [pending] });
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    // composite enables this project to be referenced by tsconfig.json so the
+    // Vite/Vitest config is type-checked as part of `tsc -b`. A referenced
+    // composite project must emit, so output (declarations + build info) is
+    // directed into the gitignored node_modules/.tmp scratch directory.
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "outDir": "./node_modules/.tmp/tsc-node",
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true
+  },
+  "include": ["vite.config.ts"]
+}

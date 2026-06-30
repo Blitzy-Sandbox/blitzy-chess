@@ -1,0 +1,118 @@
+# ============================================================================
+# Backend tool configuration for the `chess_ai` package.
+#
+# This file centralizes settings for the backend TOOLCHAIN ONLY:
+#   - ruff     -> linting + formatting        (make lint  / make format)
+#   - pytest   -> test discovery + async mode (make test-backend)
+#   - coverage -> informational reporting     (opt-in via `pytest --cov`)
+#
+# It is intentionally NOT a dependency manifest. Runtime dependencies live in
+# `requirements.txt` and development/test dependencies in `requirements-dev.txt`.
+#
+# There is deliberately NO `[build-system]` table and NO `src/` layout: the
+# `chess_ai` package sits directly at `backend/chess_ai/` and every tool runs
+# with the working directory set to `backend/` (Uvicorn runs
+# `chess_ai.app:app`; pytest is invoked from `backend/`). Consequently, every
+# path in this file is relative to `backend/`.
+# ============================================================================
+
+[project]
+# Minimal, NON-AUTHORITATIVE project metadata. Dependencies are intentionally
+# omitted here so they are not duplicated; requirements.txt / requirements-dev.txt
+# remain the single source of truth for installed packages.
+name = "chess-ai-backend"
+version = "0.1.0"
+description = "Chess AI backend: FastAPI + WebSocket server and a hand-built chess engine."
+requires-python = ">=3.11"
+
+# ----------------------------------------------------------------------------
+# ruff: linter + formatter (the only Python lint/format toolchain for this repo)
+# ----------------------------------------------------------------------------
+[tool.ruff]
+# The project targets Python 3.11+, so pyupgrade rewrites and modern-syntax
+# checks assume the 3.11 baseline.
+target-version = "py311"
+line-length = 100
+# Skip the virtual environment and runtime-data directories. `extend-exclude`
+# (rather than `exclude`) is used so ruff keeps its built-in default excludes
+# (e.g. .git, build/, dist/) in addition to the entries listed here.
+#   .venv   -> backend virtual environment
+#   books   -> downloaded Polyglot opening book (make download-book)
+#   tables  -> downloaded Syzygy tablebases (make download-syzygy)
+#   games   -> self-play recordings + transcripts (backend/games/)
+extend-exclude = [".venv", "books", "tables", "games", "__pycache__"]
+
+[tool.ruff.lint]
+# A pragmatic, non-fighting rule set chosen to catch real defects without
+# generating noise the codebase cannot reasonably satisfy:
+#   E, W -> pycodestyle errors and warnings
+#   F    -> pyflakes (undefined names, unused imports/variables)
+#   I    -> isort (import ordering / grouping)
+#   UP   -> pyupgrade (modernize syntax for the py311 target)
+#   B    -> flake8-bugbear (likely bugs and risky patterns)
+#   C4   -> flake8-comprehensions (clearer, faster comprehensions)
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+# Line length is enforced by the formatter (`ruff format`), so the lint-side
+# E501 check is silenced to avoid duplicate / unfixable warnings on long
+# strings and URLs the formatter cannot split.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# Treat the backend package as first-party so its imports are grouped
+# separately from third-party packages (fastapi, chess, structlog, ...).
+known-first-party = ["chess_ai"]
+
+[tool.ruff.format]
+# Deterministic formatting so `ruff format .` (make format) is stable and
+# `ruff format --check .` is a reliable gate.
+quote-style = "double"
+indent-style = "space"
+
+# ----------------------------------------------------------------------------
+# pytest
+# ----------------------------------------------------------------------------
+[tool.pytest.ini_options]
+# Test suites live in `backend/tests/` (path relative to backend/, the pytest
+# working directory).
+testpaths = ["tests"]
+# REQUIRED. `auto` mode lets pytest-asyncio run `async def` test coroutines
+# WITHOUT a per-test `@pytest.mark.asyncio` marker. The WebSocket suites
+# (test_game_ws.py, test_multiplayer_ws.py) and the self-play suite
+# (test_self_play.py) are async and depend on this; without it those tests
+# would error or be skipped.
+asyncio_mode = "auto"
+# Quiet output (`-q`) plus a short summary of all non-passing outcomes (`-ra`).
+# Coverage flags are intentionally NOT added here: in this local-verification
+# scope `make test-backend` must never fail purely because of coverage. To
+# collect coverage on demand, run `pytest --cov=chess_ai --cov-report=term-missing`.
+addopts = "-ra -q"
+# Discovery patterns (set explicitly to the standard defaults for clarity).
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# Keep test output focused. The second entry silences the pinned Starlette's
+# TestClient notice (it suggests an `httpx2` package that is not generally
+# available); the WebSocket suites keep using the supported TestClient. This
+# warning subclasses UserWarning, so the DeprecationWarning filter does not
+# cover it. Rationale and the deviation are recorded in docs/decision-log.md.
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]
+
+# ----------------------------------------------------------------------------
+# coverage (informational only; pytest-cov is a dev dependency)
+# ----------------------------------------------------------------------------
+[tool.coverage.run]
+# Measure branch coverage for the application package only.
+branch = true
+source = ["chess_ai"]
+# Exclude test code and the virtual environment from measurement.
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+# NOTE: no `fail_under` threshold is set on purpose. Coverage stays purely
+# informational so the backend test suite never fails solely on coverage in
+# this local-verification scope.
